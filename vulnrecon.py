@@ -1029,6 +1029,315 @@ def run_cloud_checker(target, timeout=5, threads=10):
 
 
 # ─────────────────────────────────────────────────────
+#  Module 7: Passive Attack Surface Mapper
+# ─────────────────────────────────────────────────────
+
+# Database management panels to probe (passive — just check if they exist)
+DB_PANEL_PATHS = [
+    ("/adminer.php", "Adminer"),
+    ("/adminer/", "Adminer"),
+    ("/phpmyadmin/", "phpMyAdmin"),
+    ("/pma/", "phpMyAdmin"),
+    ("/myadmin/", "phpMyAdmin"),
+    ("/phppgadmin/", "phpPgAdmin"),
+    ("/pgadmin/", "pgAdmin"),
+    ("/dbadmin/", "DB Admin"),
+    ("/mysql/", "MySQL Panel"),
+    ("/mongo-express/", "Mongo Express"),
+    ("/rockmongo/", "RockMongo"),
+    ("/redis-commander/", "Redis Commander"),
+    ("/elasticsearch/", "Elasticsearch"),
+    ("/_cat/indices", "Elasticsearch API"),
+    ("/_cluster/health", "Elasticsearch API"),
+    ("/solr/", "Apache Solr"),
+    ("/couchdb/", "CouchDB"),
+    ("/_utils/", "CouchDB Fauxton"),
+    ("/_all_dbs", "CouchDB API"),
+    ("/neo4j/", "Neo4j"),
+]
+
+# Patterns in HTML that indicate error/debug info disclosure
+ERROR_PATTERNS = [
+    ("SQL syntax", "ALTA", "Mensagem de erro SQL exposta"),
+    ("mysql_fetch", "ALTA", "Funcao MySQL exposta no output"),
+    ("pg_query", "ALTA", "Funcao PostgreSQL exposta"),
+    ("ORA-", "ALTA", "Erro Oracle Database exposto"),
+    ("ODBC SQL Server", "ALTA", "Erro MSSQL/ODBC exposto"),
+    ("Traceback (most recent call last)", "ALTA", "Stack trace Python exposto"),
+    ("at java.", "MEDIA", "Stack trace Java exposto"),
+    ("at org.", "MEDIA", "Stack trace Java/Spring exposto"),
+    ("Exception in thread", "MEDIA", "Excecao Java nao tratada"),
+    ("Warning: ", "MEDIA", "Warning PHP exposto"),
+    ("Fatal error", "ALTA", "Erro fatal PHP exposto"),
+    ("Notice: ", "BAIXA", "Notice PHP exposto"),
+    ("Parse error", "ALTA", "Erro de parse PHP exposto"),
+    ("Stack Trace:", "MEDIA", "Stack trace .NET exposto"),
+    ("Server Error in", "MEDIA", "Erro de servidor ASP.NET"),
+    ("X-Debug-Token", "MEDIA", "Symfony debug token exposto"),
+    ("DJANGO_SETTINGS_MODULE", "ALTA", "Config Django exposta"),
+    ("DEBUG = True", "ALTA", "Modo debug Django ativo"),
+    ("Laravel", "BAIXA", "Framework Laravel identificado"),
+    ("APP_DEBUG", "ALTA", "Debug mode Laravel exposto"),
+]
+
+
+def _probe_db_panel(base_url, path, panel_name, timeout):
+    """Check if a database management panel exists at the given path."""
+    full_url = base_url.rstrip("/") + path
+    try:
+        resp = requests.get(
+            full_url, timeout=timeout, allow_redirects=True, verify=False,
+            headers={"User-Agent": "VulnRecon/3.0 (Security Audit)"}
+        )
+        code = resp.status_code
+        found = code in (200, 301, 302, 401, 403)
+        return {"path": path, "panel": panel_name, "code": code, "found": found}
+    except (Timeout, ConnectionError, RequestException):
+        return {"path": path, "panel": panel_name, "code": None, "found": False}
+
+
+def _extract_links_and_params(url, timeout):
+    """
+    Fetch a page and extract all links with URL parameters.
+    Returns a list of dicts: {url, params: [list of param names]}.
+    This is purely passive — only reads the HTML, no injection.
+    """
+    found_params = []
+    try:
+        resp = requests.get(
+            url, timeout=timeout, allow_redirects=True, verify=False,
+            headers={"User-Agent": "VulnRecon/3.0 (Security Audit)"}
+        )
+        body = resp.text
+    except (Timeout, ConnectionError, RequestException):
+        return found_params
+
+    # Extract href values from HTML
+    href_pattern = re.compile(r'href=["\']([^"\'>]+)["\']', re.IGNORECASE)
+    action_pattern = re.compile(r'action=["\']([^"\'>]+)["\']', re.IGNORECASE)
+
+    all_urls = set()
+    for pattern in (href_pattern, action_pattern):
+        all_urls.update(pattern.findall(body))
+
+    # Parse each URL for query parameters
+    base_parsed = urlparse(url)
+    for raw_link in all_urls:
+        # Resolve relative URLs
+        if raw_link.startswith("/"):
+            full = f"{base_parsed.scheme}://{base_parsed.netloc}{raw_link}"
+        elif raw_link.startswith("http"):
+            full = raw_link
+        elif raw_link.startswith("?"):
+            full = f"{url.split('?')[0]}{raw_link}"
+        else:
+            continue
+
+        parsed = urlparse(full)
+        if parsed.query:
+            # Extract parameter names from query string
+            param_names = []
+            for part in parsed.query.split("&"):
+                if "=" in part:
+                    param_names.append(part.split("=", 1)[0])
+            if param_names:
+                clean_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+                found_params.append({
+                    "url": clean_url,
+                    "params": param_names,
+                    "full_url": full,
+                })
+
+    # Deduplicate by URL
+    seen = set()
+    unique = []
+    for item in found_params:
+        key = item["url"]
+        if key not in seen:
+            seen.add(key)
+            unique.append(item)
+    return unique
+
+
+def _check_error_disclosure(url, timeout):
+    """
+    Fetch the target page and scan for error/debug disclosure patterns.
+    This is passive — only reads the normal response, no payloads sent.
+    Returns a list of dicts: {pattern, severity, description}.
+    """
+    findings = []
+    try:
+        resp = requests.get(
+            url, timeout=timeout, allow_redirects=True, verify=False,
+            headers={"User-Agent": "VulnRecon/3.0 (Security Audit)"}
+        )
+        body = resp.text
+        headers_str = str(resp.headers)
+    except (Timeout, ConnectionError, RequestException):
+        return findings
+
+    search_text = body + headers_str
+    for pattern, severity, description in ERROR_PATTERNS:
+        if pattern.lower() in search_text.lower():
+            findings.append({
+                "pattern": pattern,
+                "severity": severity,
+                "description": description,
+            })
+    return findings
+
+
+def run_surface_mapper(target, timeout=5, threads=10):
+    """Run the Passive Attack Surface Mapper module."""
+    w = get_panel_width()
+    print(BANNER_MINI)
+    draw_box([
+        f"  {C.W}Alvo: {C.BLD}{target['url']}{C.RST}",
+        f"  {C.DIM}Mapeamento passivo de superficie de ataque.{C.RST}",
+        f"  {C.DIM}Nenhum payload e enviado — apenas observacao.{C.RST}",
+    ], width=w, title=f"{C.CY}{C.BLD}MAPEADOR DE SUPERFICIE DE ATAQUE{C.RST}")
+
+    total_findings = 0
+
+    # ── Phase 1: Database Panel Discovery ──
+    print()
+    sp = Spinner("Buscando paineis de banco de dados...")
+    sp.start()
+    t0 = time.time()
+    db_results = []
+    with ThreadPoolExecutor(max_workers=threads) as ex:
+        futs = {
+            ex.submit(_probe_db_panel, target["url"], path, name, timeout): path
+            for path, name in DB_PANEL_PATHS
+        }
+        for f in as_completed(futs):
+            try:
+                db_results.append(f.result())
+            except Exception:
+                db_results.append({"path": futs[f], "panel": "?", "code": None, "found": False})
+    elapsed = time.time() - t0
+    sp.stop(f"Busca concluida em {elapsed:.2f}s")
+
+    db_results.sort(key=lambda r: (not r["found"], r["path"]))
+    db_found = [r for r in db_results if r["found"]]
+
+    hdr = [("Rota", 24), ("Painel", 18), ("HTTP", 6), ("Status", 12)]
+    rows = []
+    for r in db_results:
+        p = r["path"][:22] + ".." if len(r["path"]) > 24 else r["path"]
+        if r["code"] is None:
+            rows.append([f"{C.DIM}{p}{C.RST}", f"{C.DIM}{r['panel']}{C.RST}",
+                         f"{C.DIM}---{C.RST}", f"{C.DIM}TIMEOUT{C.RST}"])
+        elif r["found"]:
+            clr = C.R if r["code"] == 200 else C.M
+            lbl = "EXPOSTO" if r["code"] == 200 else "EXISTE"
+            rows.append([p, f"{C.Y}{C.BLD}{r['panel']}{C.RST}",
+                         f"{clr}{r['code']}{C.RST}", f"{clr}{C.BLD}{lbl}{C.RST}"])
+        else:
+            rows.append([f"{C.DIM}{p}{C.RST}", f"{C.DIM}{r['panel']}{C.RST}",
+                         f"{C.DIM}{r['code']}{C.RST}", f"{C.G}N/A{C.RST}"])
+
+    print()
+    draw_table(hdr, rows)
+    total_findings += len(db_found)
+
+    if db_found:
+        panels_str = ", ".join(set(r["panel"] for r in db_found))
+        print()
+        draw_box([
+            f"  {C.R}{C.BLD}{len(db_found)} painel(is) de BD encontrado(s)!{C.RST}",
+            f"  {C.W}Tecnologias: {C.Y}{C.BLD}{panels_str}{C.RST}",
+        ], width=w, title=f"{C.R}{C.BLD}ALERTA{C.RST}", bc=C.R)
+
+    # ── Phase 2: URL Parameter Discovery ──
+    print()
+    sp = Spinner("Extraindo parametros de URLs da pagina...")
+    sp.start()
+    params = _extract_links_and_params(target["url"], timeout)
+    sp.stop(f"{len(params)} URL(s) com parametros encontrada(s)")
+
+    if params:
+        hdr2 = [("URL", 32), ("Parametros", 28)]
+        rows2 = []
+        for item in params[:20]:  # Limit display to 20 entries
+            url_display = item["url"]
+            if len(url_display) > 32:
+                url_display = url_display[:30] + ".."
+            p_str = ", ".join(item["params"][:5])  # Max 5 params shown
+            if len(item["params"]) > 5:
+                p_str += f" (+{len(item['params']) - 5})"
+            rows2.append([url_display, f"{C.Y}{p_str}{C.RST}"])
+        total_findings += len(params)
+
+        print()
+        draw_table(hdr2, rows2)
+        print()
+        draw_box([
+            f"  {C.Y}{C.BLD}{len(params)} endpoint(s) com parametros{C.RST}",
+            f"  {C.DIM}Parametros em URLs sao potenciais pontos{C.RST}",
+            f"  {C.DIM}de entrada para ataques de injection.{C.RST}",
+        ], width=w, title=f"{C.Y}{C.BLD}SUPERFICIE DE ATAQUE{C.RST}", bc=C.Y)
+    else:
+        print()
+        draw_box([
+            f"  {C.G}Nenhum parametro de URL encontrado na pagina.{C.RST}",
+        ], width=w, title=f"{C.G}{C.BLD}PARAMETROS{C.RST}", bc=C.G)
+
+    # ── Phase 3: Error/Debug Disclosure ──
+    print()
+    sp = Spinner("Analisando divulgacao de erros e debug...")
+    sp.start()
+    errors = _check_error_disclosure(target["url"], timeout)
+    sp.stop(f"{len(errors)} indicador(es) de divulgacao encontrado(s)")
+
+    if errors:
+        err_lines = []
+        for e in errors:
+            sc = SEV_C.get(e["severity"], C.W)
+            err_lines.append(f"  {C.R}!{C.RST} {C.W}{e['pattern']}{C.RST} {sc}[{e['severity']}]{C.RST}")
+            err_lines.append(f"    {C.DIM}{e['description']}{C.RST}")
+        total_findings += len(errors)
+
+        print()
+        draw_box(err_lines, width=w, title=f"{C.R}{C.BLD}DIVULGACAO DE ERROS{C.RST}", bc=C.R)
+    else:
+        print()
+        draw_box([
+            f"  {C.G}Nenhum vazamento de erro/debug detectado.{C.RST}",
+        ], width=w, title=f"{C.G}{C.BLD}ERROR DISCLOSURE{C.RST}", bc=C.G)
+
+    # ── Final Report ──
+    print()
+    if total_findings:
+        risk_clr = C.R if total_findings >= 5 else C.Y
+        draw_box([
+            f"  {C.W}{C.BLD}Relatorio de Superficie de Ataque{C.RST}",
+            "",
+            f"  {C.CY}Paineis de BD expostos: {C.R if db_found else C.G}{C.BLD}{len(db_found)}{C.RST}",
+            f"  {C.CY}URLs com parametros:    {C.Y if params else C.G}{C.BLD}{len(params)}{C.RST}",
+            f"  {C.CY}Vazamentos de erro:     {C.R if errors else C.G}{C.BLD}{len(errors)}{C.RST}",
+            "",
+            f"  {C.W}Total de pontos de atencao: {risk_clr}{C.BLD}{total_findings}{C.RST}",
+            "",
+            f"  {C.DIM}Este relatorio nao executa nenhum ataque.{C.RST}",
+            f"  {C.DIM}Use-o para documentar e reportar falhas{C.RST}",
+            f"  {C.DIM}ao responsavel pelo sistema.{C.RST}",
+        ], width=w, title=f"{C.CY}{C.BLD}RESULTADO FINAL{C.RST}")
+    else:
+        draw_box([
+            f"  {C.G}{C.BLD}Superficie de ataque minima detectada.{C.RST}",
+            f"  {C.DIM}Nenhum painel, parametro ou erro exposto.{C.RST}",
+        ], width=w, title=f"{C.G}{C.BLD}RESULTADO{C.RST}", bc=C.G)
+
+    return {
+        "db_panels": db_found,
+        "url_params": params,
+        "error_disclosures": errors,
+        "total": total_findings,
+    }
+
+
+# ─────────────────────────────────────────────────────
 #  Full Audit
 # ─────────────────────────────────────────────────────
 
@@ -1040,7 +1349,7 @@ def _pause_and_clear():
 
 
 def run_full_audit(target):
-    """Run all 6 modules sequentially with pauses between them."""
+    """Run all 7 modules sequentially with pauses between them."""
     w = get_panel_width()
 
     port_res = run_port_scanner(target)
@@ -1059,6 +1368,9 @@ def run_full_audit(target):
     _pause_and_clear()
 
     cloud_res = run_cloud_checker(target)
+    _pause_and_clear()
+
+    surface_res = run_surface_mapper(target)
 
     # Summary
     op = len([r for r in port_res if r["is_open"]])
@@ -1067,7 +1379,8 @@ def run_full_audit(target):
     ap = len([r for r in admin_res if r["found"]])
     cv = len(cve_res)
     pb = len([r for r in cloud_res if r.get("public")])
-    total = op + mh + ed + ap + cv + pb
+    sf = surface_res.get("total", 0)
+    total = op + mh + ed + ap + cv + pb + sf
 
     if total == 0:
         risk, rc = "BAIXO", C.G
@@ -1088,6 +1401,7 @@ def run_full_audit(target):
         f"  {C.CY}Paineis de admin:    {C.R if ap else C.G}{C.BLD}{ap}{C.RST}",
         f"  {C.CY}CVEs encontradas:    {C.R if cv else C.G}{C.BLD}{cv}{C.RST}",
         f"  {C.CY}Buckets publicos:    {C.R if pb else C.G}{C.BLD}{pb}{C.RST}",
+        f"  {C.CY}Superficie ataque:   {C.R if sf else C.G}{C.BLD}{sf}{C.RST}",
         "",
         f"  {C.W}Total de achados: {rc}{C.BLD}{total}{C.RST}",
         f"  {C.W}Nivel de risco:   {rc}{C.BLD}{risk}{C.RST}",
@@ -1128,6 +1442,9 @@ def show_help():
         "",
         f"  {C.W}{C.BLD}[6] Verificador de Buckets{C.RST}",
         f"  {C.DIM}Checa buckets S3, Azure, GCS expostos.{C.RST}",
+        "",
+        f"  {C.W}{C.BLD}[7] Mapeador de Superficie de Ataque{C.RST}",
+        f"  {C.DIM}Paineis de BD, parametros e erros expostos.{C.RST}",
     ], width=w, title=f"{C.CY}{C.BLD}MODULOS{C.RST}")
 
     print()
@@ -1152,7 +1469,7 @@ def show_menu():
     w = get_panel_width()
     draw_box([
         f"  {C.CY}{C.BLD}[1]{C.RST}  {C.W}{C.BLD}Auditoria Completa{C.RST}",
-        f"       {C.DIM}Todos os 6 modulos de uma vez{C.RST}",
+        f"       {C.DIM}Todos os 7 modulos de uma vez{C.RST}",
         "",
         f"  {C.CY}{C.BLD}[2]{C.RST}  {C.W}{C.BLD}Escanear Portas{C.RST}",
         f"       {C.DIM}Testa conexoes TCP nas portas criticas{C.RST}",
@@ -1172,7 +1489,10 @@ def show_menu():
         f"  {C.CY}{C.BLD}[7]{C.RST}  {C.W}{C.BLD}Verificador de Buckets na Nuvem{C.RST}",
         f"       {C.DIM}Checa S3, Azure Blob, Google GCS{C.RST}",
         "",
-        f"  {C.CY}{C.BLD}[8]{C.RST}  {C.W}{C.BLD}Ajuda / Sobre{C.RST}",
+        f"  {C.CY}{C.BLD}[8]{C.RST}  {C.W}{C.BLD}Mapeador de Superficie de Ataque{C.RST}",
+        f"       {C.DIM}Paineis de BD + parametros + erros{C.RST}",
+        "",
+        f"  {C.CY}{C.BLD}[9]{C.RST}  {C.W}{C.BLD}Ajuda / Sobre{C.RST}",
         f"       {C.DIM}Conceitos e uso legal{C.RST}",
         "",
         f"  {C.R}{C.BLD}[0]{C.RST}  {C.DIM}Sair{C.RST}",
@@ -1196,6 +1516,8 @@ def run_scan_module(choice, target):
         run_cve_scanner(target)
     elif choice == "7":
         run_cloud_checker(target)
+    elif choice == "8":
+        run_surface_mapper(target)
 
 
 # ─────────────────────────────────────────────────────
@@ -1228,14 +1550,14 @@ def main():
             print()
             break
 
-        elif choice == "8":
+        elif choice == "9":
             clear_screen()
             show_help()
             print()
             input(f"  {C.DIM}Pressione Enter para voltar ao menu...{C.RST}")
             continue
 
-        elif choice in ("1", "2", "3", "4", "5", "6", "7"):
+        elif choice in ("1", "2", "3", "4", "5", "6", "7", "8"):
             clear_screen()
             print(BANNER_MINI)
             target = prompt_target()
@@ -1253,7 +1575,7 @@ def main():
             print()
             draw_box([
                 f"  {C.R}Opcao '{choice}' invalida.{C.RST}",
-                f"  {C.DIM}Digite um numero de 0 a 8.{C.RST}",
+                f"  {C.DIM}Digite um numero de 0 a 9.{C.RST}",
             ], width=get_panel_width(), title=f"{C.R}{C.BLD}ERRO{C.RST}", bc=C.R)
             time.sleep(1.5)
 
