@@ -5,6 +5,11 @@ A polished, menu-driven vulnerability scanner with styled terminal UI.
 Modules: Port Scanner | HTTP Headers | Dir Fuzzer | Admin Hunter | CVE Scanner | Cloud Buckets
 """
 
+# ─────────────────────────────────────────────────────
+#  VirusTotal API Key (insert yours below)
+# ─────────────────────────────────────────────────────
+VIRUSTOTAL_API_KEY = "d3907ef31017f69d9473428ea32aeb232dfa820ca70479c3377e8d02d77eab73"  
+
 import os
 import platform
 import re
@@ -13,6 +18,9 @@ import sys
 import threading
 import time
 import json
+import random
+import string
+import hashlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse
 
@@ -77,6 +85,44 @@ class C:
     BLD  = "\033[1m"
     DIM  = "\033[2m"
     RST  = "\033[0m"
+
+
+# ─────────────────────────────────────────────────────
+#  Stealth & Request Utilities
+# ─────────────────────────────────────────────────────
+
+_USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.0; rv:121.0) Gecko/20100101 Firefox/121.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36 Edg/119.0.0.0",
+]
+
+# Global throttle delay (seconds) between requests per thread
+THROTTLE_DELAY = 0.15
+
+
+def _random_ua():
+    """Return a random legitimate browser User-Agent string."""
+    return random.choice(_USER_AGENTS)
+
+
+def _vr_get(url, timeout=5, **kwargs):
+    """
+    VulnRecon GET wrapper with random User-Agent and throttle.
+    Thread-safe; applies a small delay to avoid target overload.
+    """
+    time.sleep(random.uniform(THROTTLE_DELAY * 0.5, THROTTLE_DELAY * 1.5))
+    headers = kwargs.pop("headers", {})
+    headers.setdefault("User-Agent", _random_ua())
+    return requests.get(
+        url, timeout=timeout, verify=kwargs.pop("verify", False),
+        allow_redirects=kwargs.pop("allow_redirects", True),
+        headers=headers, **kwargs
+    )
 
 
 # ─────────────────────────────────────────────────────
@@ -424,12 +470,11 @@ STATUS_LBL = {
 
 def _fuzz_path(base, path, timeout):
     try:
-        r = requests.get(base.rstrip("/") + path, timeout=timeout,
-                         allow_redirects=False, verify=False,
-                         headers={"User-Agent": "VulnRecon/2.0"})
-        return {"path": path, "code": r.status_code, "hit": r.status_code in INTERESTING}
+        r = _vr_get(base.rstrip("/") + path, timeout=timeout, allow_redirects=False)
+        clen = len(r.content)
+        return {"path": path, "code": r.status_code, "hit": r.status_code in INTERESTING, "clen": clen}
     except (Timeout, ConnectionError, RequestException):
-        return {"path": path, "code": None, "hit": False}
+        return {"path": path, "code": None, "hit": False, "clen": 0}
 
 
 def run_directory_fuzzer(target, timeout=5, threads=10):
@@ -440,7 +485,22 @@ def run_directory_fuzzer(target, timeout=5, threads=10):
         f"  {C.W}Wordlist: {C.BLD}{len(FUZZ_PATHS)}{C.RST} rotas | Threads: {C.BLD}{threads}{C.RST}",
     ], width=w, title=f"{C.CY}{C.BLD}CACA-DIRETORIOS{C.RST}")
 
+    # Baseline calibration: detect soft-404 / catch-all pages
     print()
+    rand_slug = "/" + "".join(random.choices(string.ascii_lowercase, k=16))
+    baseline_clen = None
+    try:
+        bl_resp = _vr_get(target["url"].rstrip("/") + rand_slug, timeout=timeout, allow_redirects=False)
+        if bl_resp.status_code == 200:
+            baseline_clen = len(bl_resp.content)
+            draw_box([
+                f"  {C.Y}Soft-404 detectado (catch-all page){C.RST}",
+                f"  {C.DIM}Baseline: {baseline_clen} bytes — filtrando falsos positivos{C.RST}",
+            ], width=w, title=f"{C.Y}{C.BLD}CALIBRACAO{C.RST}", bc=C.Y)
+            print()
+    except (Timeout, ConnectionError, RequestException):
+        pass
+
     sp = Spinner("Fuzzing em andamento...")
     sp.start()
     t0 = time.time()
@@ -451,9 +511,23 @@ def run_directory_fuzzer(target, timeout=5, threads=10):
             try:
                 results.append(f.result())
             except Exception:
-                results.append({"path": futs[f], "code": None, "hit": False})
+                results.append({"path": futs[f], "code": None, "hit": False, "clen": 0})
     elapsed = time.time() - t0
     sp.stop(f"Fuzzing concluido em {elapsed:.2f}s")
+
+    # Filter out soft-404 false positives
+    if baseline_clen is not None:
+        fp_count = 0
+        for r in results:
+            if r["hit"] and r["code"] == 200 and r["clen"] == baseline_clen:
+                r["hit"] = False
+                r["code_note"] = "SOFT-404"
+                fp_count += 1
+        if fp_count:
+            draw_box([
+                f"  {C.G}{fp_count} falso(s) positivo(s) filtrado(s) pelo baseline.{C.RST}",
+            ], width=w, title=f"{C.G}{C.BLD}FILTRO{C.RST}", bc=C.G)
+            print()
 
     results.sort(key=lambda r: (not r["hit"], r["path"]))
     hdr = [("Rota", 30), ("HTTP", 6), ("Veredicto", 14)]
@@ -1029,7 +1103,274 @@ def run_cloud_checker(target, timeout=5, threads=10):
 
 
 # ─────────────────────────────────────────────────────
-#  Module 7: Passive Attack Surface Mapper
+#  Module 7: WAF Detection (Pre-Scan)
+# ─────────────────────────────────────────────────────
+
+WAF_SIGNATURES = {
+    "Cloudflare":  ["cloudflare", "cf-ray", "cf-cache-status", "__cfduid"],
+    "Akamai":      ["akamai", "x-akamai", "akamaighost"],
+    "Sucuri":      ["sucuri", "x-sucuri"],
+    "AWS WAF":     ["awselb", "x-amzn", "x-amz-cf"],
+    "Imperva":     ["imperva", "incapsula", "x-iinfo"],
+    "F5 BIG-IP":   ["bigip", "f5", "x-wa-info"],
+    "ModSecurity": ["mod_security", "modsecurity"],
+    "Barracuda":   ["barracuda", "barra_counter"],
+    "Fortinet":    ["fortigate", "fortiWeb"],
+    "Wordfence":   ["wordfence"],
+}
+
+
+def run_waf_detector(target, timeout=10):
+    """Detect Web Application Firewalls via header analysis and probe."""
+    w = get_panel_width()
+    print(BANNER_MINI)
+    draw_box([
+        f"  {C.W}Alvo: {C.BLD}{target['url']}{C.RST}",
+        f"  {C.DIM}Analise passiva de headers + probe inofensivo.{C.RST}",
+    ], width=w, title=f"{C.CY}{C.BLD}DETETOR DE WAF{C.RST}")
+
+    detected = []
+
+    # Phase 1: Normal request header analysis
+    print()
+    sp = Spinner("Analisando headers do servidor...")
+    sp.start()
+    try:
+        resp = _vr_get(target["url"], timeout=timeout)
+        all_headers = str(resp.headers).lower()
+        server = resp.headers.get("Server", "").lower()
+
+        for waf_name, patterns in WAF_SIGNATURES.items():
+            for p in patterns:
+                if p.lower() in all_headers or p.lower() in server:
+                    detected.append({"waf": waf_name, "evidence": p, "method": "Headers"})
+                    break
+    except (Timeout, ConnectionError, RequestException):
+        sp.stop()
+        draw_box([f"  {C.R}Falha na conexao.{C.RST}"], width=w, bc=C.R,
+                 title=f"{C.R}{C.BLD}ERRO{C.RST}")
+        return detected
+    sp.stop(f"Headers analisados")
+
+    # Phase 2: Probe with blockable (but harmless) payload
+    print()
+    sp = Spinner("Enviando probe inofensivo para detecao de WAF...")
+    sp.start()
+    probe_url = target["url"].rstrip("/") + "/?id=<script>alert(1)</script>"
+    try:
+        probe_resp = _vr_get(probe_url, timeout=timeout)
+        probe_headers = str(probe_resp.headers).lower()
+        probe_body = probe_resp.text[:3000].lower()
+
+        # Check if probe triggered WAF
+        for waf_name, patterns in WAF_SIGNATURES.items():
+            for p in patterns:
+                if p.lower() in probe_headers or p.lower() in probe_body:
+                    if not any(d["waf"] == waf_name for d in detected):
+                        detected.append({"waf": waf_name, "evidence": p, "method": "Probe"})
+                    break
+
+        # Check for WAF-like blocking behavior
+        if probe_resp.status_code in (403, 406, 429, 503):
+            if not detected:
+                detected.append({"waf": "Desconhecido", "evidence": f"HTTP {probe_resp.status_code} no probe", "method": "Probe"})
+
+    except (Timeout, ConnectionError, RequestException):
+        pass
+    sp.stop(f"Probe concluido")
+
+    # Display results
+    print()
+    if detected:
+        hdr = [("WAF", 16), ("Evidencia", 24), ("Metodo", 10)]
+        rows = [[d["waf"], d["evidence"], d["method"]] for d in detected]
+        draw_table(hdr, rows)
+        unique_wafs = set(d["waf"] for d in detected)
+        print()
+        draw_box([
+            f"  {C.R}{C.BLD}{len(unique_wafs)} WAF(s) detectado(s)!{C.RST}",
+            f"  {C.W}Identificados: {C.Y}{C.BLD}{', '.join(unique_wafs)}{C.RST}",
+            f"  {C.Y}O WAF pode bloquear scans e alterar resultados.{C.RST}",
+        ], width=w, title=f"{C.R}{C.BLD}ALERTA{C.RST}", bc=C.R)
+    else:
+        draw_box([
+            f"  {C.G}{C.BLD}Nenhum WAF detectado.{C.RST}",
+            f"  {C.DIM}O alvo nao parece ter firewall de aplicacao.{C.RST}",
+        ], width=w, title=f"{C.G}{C.BLD}RESULTADO{C.RST}", bc=C.G)
+    return detected
+
+
+# ─────────────────────────────────────────────────────
+#  Module 8: Passive Error-Based DB Scanner
+# ─────────────────────────────────────────────────────
+
+# Syntax-breaking chars (NOT exploitation payloads — just syntax probes)
+_SYNTAX_PROBES = ["'", '"', "%00", "\\", ";", ")", "{{"]
+
+# DB error signatures to detect in response body
+_DB_ERROR_SIGS = [
+    ("SQL syntax", "MySQL"),
+    ("mysql_fetch", "MySQL"),
+    ("mysql_num_rows", "MySQL"),
+    ("You have an error in your SQL", "MySQL"),
+    ("pg_query", "PostgreSQL"),
+    ("pg_exec", "PostgreSQL"),
+    ("PSQLException", "PostgreSQL"),
+    ("unterminated quoted string", "PostgreSQL"),
+    ("ORA-", "Oracle"),
+    ("ODBC SQL Server", "MSSQL"),
+    ("SQLServer JDBC", "MSSQL"),
+    ("java.sql.SQLException", "Java/JDBC"),
+    ("sqlite3.OperationalError", "SQLite"),
+    ("near \":\": syntax error", "SQLite"),
+    ("PDOException", "PHP PDO"),
+    ("MongoError", "MongoDB"),
+]
+
+
+def _probe_param_for_errors(url, param, timeout):
+    """
+    Append a syntax-breaking character to a URL parameter
+    and check if the response leaks database error messages.
+    Does NOT exploit — only detects information disclosure.
+    """
+    findings = []
+    for probe in _SYNTAX_PROBES:
+        test_url = re.sub(
+            f"({re.escape(param)}=)[^&]*",
+            f"\\g<1>{probe}",
+            url
+        )
+        try:
+            resp = _vr_get(test_url, timeout=timeout, allow_redirects=True)
+            body = resp.text[:8000]
+            for sig, db_type in _DB_ERROR_SIGS:
+                if sig.lower() in body.lower():
+                    findings.append({
+                        "param": param,
+                        "probe": probe,
+                        "db_type": db_type,
+                        "signature": sig,
+                        "url": test_url,
+                    })
+                    return findings  # One finding per param is enough
+        except (Timeout, ConnectionError, RequestException):
+            continue
+    return findings
+
+
+def run_error_db_scanner(target, timeout=8):
+    """Run passive error-based DB scanner on discovered URL parameters."""
+    w = get_panel_width()
+    print(BANNER_MINI)
+    draw_box([
+        f"  {C.W}Alvo: {C.BLD}{target['url']}{C.RST}",
+        f"  {C.DIM}Detecta divulgacao de erros de BD via{C.RST}",
+        f"  {C.DIM}caracteres de quebra de sintaxe (passivo).{C.RST}",
+        "",
+        f"  {C.Y}Nao explora falhas — apenas detecta e reporta.{C.RST}",
+    ], width=w, title=f"{C.CY}{C.BLD}SCANNER DE ERROS DE BD{C.RST}")
+
+    # Step 1: Extract parameterized URLs from page
+    print()
+    sp = Spinner("Extraindo URLs com parametros...")
+    sp.start()
+    param_urls = _extract_links_and_params(target["url"], timeout)
+    sp.stop(f"{len(param_urls)} URL(s) com parametros encontrada(s)")
+
+    if not param_urls:
+        print()
+        draw_box([
+            f"  {C.G}Nenhum parametro encontrado para testar.{C.RST}",
+            f"  {C.DIM}O alvo nao expoe URLs com parametros.{C.RST}",
+        ], width=w, title=f"{C.G}{C.BLD}RESULTADO{C.RST}", bc=C.G)
+        return []
+
+    # Step 2: Test each parameterized URL
+    all_findings = []
+    tested = 0
+    for item in param_urls[:15]:  # Limit to 15 URLs to avoid flooding
+        for param in item["params"][:3]:  # Max 3 params per URL
+            tested += 1
+            print()
+            sp = Spinner(f"Testando {param}=... ({tested})")
+            sp.start()
+            findings = _probe_param_for_errors(item["full_url"], param, timeout)
+            if findings:
+                sp.stop(f"Erro de BD detectado em '{param}'!")
+                all_findings.extend(findings)
+            else:
+                sp.stop(f"'{param}' — sem divulgacao")
+
+    # Display results
+    print()
+    if all_findings:
+        hdr = [("Parametro", 12), ("Banco", 12), ("Assinatura", 26), ("Probe", 6)]
+        rows = []
+        for f in all_findings:
+            sig = f["signature"][:24] + ".." if len(f["signature"]) > 26 else f["signature"]
+            rows.append([f["param"], f"{C.R}{C.BLD}{f['db_type']}{C.RST}",
+                         sig, f"{C.R}{f['probe']}{C.RST}"])
+        draw_table(hdr, rows)
+        print()
+        draw_box([
+            f"  {C.R}{C.BLD}{len(all_findings)} divulgacao(oes) de erro de BD!{C.RST}",
+            f"  {C.Y}Erros de BD expostos revelam tecnologia interna{C.RST}",
+            f"  {C.Y}e podem indicar vulnerabilidades de injection.{C.RST}",
+            "",
+            f"  {C.DIM}Reporte ao responsavel do sistema para correcao.{C.RST}",
+        ], width=w, title=f"{C.R}{C.BLD}RESULTADO CRITICO{C.RST}", bc=C.R)
+    else:
+        draw_box([
+            f"  {C.G}{C.BLD}Nenhum erro de BD detectado.{C.RST}",
+            f"  {C.DIM}Testados {tested} parametro(s) sem divulgacao.{C.RST}",
+        ], width=w, title=f"{C.G}{C.BLD}RESULTADO{C.RST}", bc=C.G)
+    return all_findings
+
+
+# ─────────────────────────────────────────────────────
+#  Report Export
+# ─────────────────────────────────────────────────────
+
+def export_report(target, results_dict, output_path="report_vulnrecon.json"):
+    """Export all scan results to a structured JSON report file."""
+    w = get_panel_width()
+    report = {
+        "tool": "VulnRecon",
+        "version": "3.0",
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "target": {
+            "hostname": target["hostname"],
+            "ip": target["ip"],
+            "url": target["url"],
+        },
+        "results": {},
+    }
+
+    # Serialize each module's results (filter non-serializable data)
+    for module_name, data in results_dict.items():
+        try:
+            json.dumps(data)  # Test serializability
+            report["results"][module_name] = data
+        except (TypeError, ValueError):
+            report["results"][module_name] = str(data)
+
+    try:
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(report, f, indent=2, ensure_ascii=False)
+        draw_box([
+            f"  {C.G}{C.BLD}Relatorio exportado com sucesso!{C.RST}",
+            f"  {C.W}Arquivo: {C.BLD}{output_path}{C.RST}",
+            f"  {C.DIM}{time.strftime('%Y-%m-%d %H:%M:%S')}{C.RST}",
+        ], width=w, title=f"{C.G}{C.BLD}EXPORTACAO{C.RST}", bc=C.G)
+    except (IOError, OSError) as e:
+        draw_box([
+            f"  {C.R}Falha ao salvar relatorio: {e}{C.RST}",
+        ], width=w, title=f"{C.R}{C.BLD}ERRO{C.RST}", bc=C.R)
+
+
+# ─────────────────────────────────────────────────────
+#  Module 9: Passive Attack Surface Mapper
 # ─────────────────────────────────────────────────────
 
 # Database management panels to probe (passive — just check if they exist)
@@ -1338,6 +1679,226 @@ def run_surface_mapper(target, timeout=5, threads=10):
 
 
 # ─────────────────────────────────────────────────────
+#  Module 10: File Malware Scanner (VirusTotal)
+# ─────────────────────────────────────────────────────
+
+def _calculate_sha256(filepath, chunk_size=65536):
+    """Calculate SHA-256 hash of a file using chunked reads."""
+    sha256 = hashlib.sha256()
+    with open(filepath, "rb") as f:
+        while True:
+            data = f.read(chunk_size)
+            if not data:
+                break
+            sha256.update(data)
+    return sha256.hexdigest()
+
+
+def _prompt_file_path():
+    """Ask the user for a local file path with validation."""
+    w = get_panel_width()
+    while True:
+        print()
+        try:
+            path = input(f"  {C.CY}▸ Caminho do ficheiro{C.RST} {C.DIM}(ou 'v' para voltar):{C.RST} ").strip()
+        except (KeyboardInterrupt, EOFError):
+            return None
+
+        if path.lower() == "v":
+            return None
+
+        # Remove surrounding quotes if any
+        path = path.strip('"').strip("'")
+
+        if not os.path.isfile(path):
+            draw_box([
+                f"  {C.R}Ficheiro nao encontrado:{C.RST}",
+                f"  {C.DIM}{path}{C.RST}",
+            ], width=w, title=f"{C.R}{C.BLD}ERRO{C.RST}", bc=C.R)
+            continue
+
+        return path
+
+
+def run_file_scanner():
+    """Scan a local file for malware using VirusTotal API."""
+    w = get_panel_width()
+    clear_screen()
+    print(BANNER_MINI)
+    draw_box([
+        f"  {C.W}{C.BLD}Scanner de Malware via VirusTotal{C.RST}",
+        f"  {C.DIM}Calcula o SHA-256 do ficheiro e consulta{C.RST}",
+        f"  {C.DIM}a base de dados do VirusTotal (API v3).{C.RST}",
+    ], width=w, title=f"{C.CY}{C.BLD}FILE MALWARE SCANNER{C.RST}")
+
+    # Check API key
+    if not VIRUSTOTAL_API_KEY:
+        print()
+        draw_box([
+            f"  {C.R}{C.BLD}API Key do VirusTotal nao configurada!{C.RST}",
+            "",
+            f"  {C.W}Abra o ficheiro vulnrecon.py e insira sua{C.RST}",
+            f"  {C.W}chave na constante {C.BLD}VIRUSTOTAL_API_KEY{C.RST}",
+            "",
+            f"  {C.DIM}Obtenha gratis em: virustotal.com/gui/join-us{C.RST}",
+        ], width=w, title=f"{C.R}{C.BLD}CONFIGURACAO{C.RST}", bc=C.R)
+        return None
+
+    # Get file path from user
+    filepath = _prompt_file_path()
+    if filepath is None:
+        return None
+
+    filename = os.path.basename(filepath)
+    filesize = os.path.getsize(filepath)
+
+    # Format file size
+    if filesize >= 1_073_741_824:
+        size_str = f"{filesize / 1_073_741_824:.2f} GB"
+    elif filesize >= 1_048_576:
+        size_str = f"{filesize / 1_048_576:.2f} MB"
+    elif filesize >= 1024:
+        size_str = f"{filesize / 1024:.2f} KB"
+    else:
+        size_str = f"{filesize} bytes"
+
+    print()
+    draw_box([
+        f"  {C.W}Ficheiro: {C.BLD}{filename}{C.RST}",
+        f"  {C.W}Tamanho:  {C.BLD}{size_str}{C.RST}",
+        f"  {C.DIM}{filepath}{C.RST}",
+    ], width=w, title=f"{C.CY}{C.BLD}FICHEIRO SELECIONADO{C.RST}")
+
+    # Step 1: Calculate SHA-256
+    print()
+    sp = Spinner("Calculando SHA-256 (chunked)...")
+    sp.start()
+    t0 = time.time()
+    try:
+        file_hash = _calculate_sha256(filepath)
+    except (IOError, OSError, PermissionError) as e:
+        sp.stop()
+        draw_box([
+            f"  {C.R}Erro ao ler ficheiro: {e}{C.RST}",
+        ], width=w, title=f"{C.R}{C.BLD}ERRO{C.RST}", bc=C.R)
+        return None
+    elapsed = time.time() - t0
+    sp.stop(f"Hash calculado em {elapsed:.2f}s")
+
+    print()
+    draw_box([
+        f"  {C.W}SHA-256:{C.RST}",
+        f"  {C.G}{C.BLD}{file_hash}{C.RST}",
+    ], width=w, title=f"{C.CY}{C.BLD}HASH{C.RST}")
+
+    # Step 2: Query VirusTotal API
+    print()
+    sp = Spinner("Consultando VirusTotal...")
+    sp.start()
+    vt_url = f"https://www.virustotal.com/api/v3/files/{file_hash}"
+    try:
+        resp = requests.get(
+            vt_url, timeout=15,
+            headers={"x-apikey": VIRUSTOTAL_API_KEY, "User-Agent": _random_ua()}
+        )
+    except (Timeout, ConnectionError, RequestException) as e:
+        sp.stop()
+        draw_box([
+            f"  {C.R}Falha na conexao com VirusTotal: {e}{C.RST}",
+        ], width=w, title=f"{C.R}{C.BLD}ERRO{C.RST}", bc=C.R)
+        return None
+    sp.stop(f"Resposta: HTTP {resp.status_code}")
+
+    # Step 3: Parse response
+    print()
+    if resp.status_code == 404:
+        draw_box([
+            f"  {C.Y}{C.BLD}Hash nao encontrado na base do VirusTotal.{C.RST}",
+            "",
+            f"  {C.DIM}O ficheiro nunca foi submetido para analise.{C.RST}",
+            f"  {C.DIM}Isso nao significa que e seguro ou malicioso.{C.RST}",
+        ], width=w, title=f"{C.Y}{C.BLD}DESCONHECIDO{C.RST}", bc=C.Y)
+        return {"hash": file_hash, "status": "unknown", "file": filename}
+
+    if resp.status_code == 401:
+        draw_box([
+            f"  {C.R}{C.BLD}API Key invalida ou expirada.{C.RST}",
+            f"  {C.DIM}Verifique a constante VIRUSTOTAL_API_KEY.{C.RST}",
+        ], width=w, title=f"{C.R}{C.BLD}ERRO DE AUTH{C.RST}", bc=C.R)
+        return None
+
+    if resp.status_code != 200:
+        draw_box([
+            f"  {C.R}Erro inesperado: HTTP {resp.status_code}{C.RST}",
+        ], width=w, title=f"{C.R}{C.BLD}ERRO{C.RST}", bc=C.R)
+        return None
+
+    try:
+        data = resp.json()
+        attrs = data["data"]["attributes"]
+        stats = attrs.get("last_analysis_stats", {})
+    except (json.JSONDecodeError, KeyError):
+        draw_box([
+            f"  {C.R}Erro ao interpretar resposta do VirusTotal.{C.RST}",
+        ], width=w, title=f"{C.R}{C.BLD}ERRO{C.RST}", bc=C.R)
+        return None
+
+    malicious = stats.get("malicious", 0)
+    suspicious = stats.get("suspicious", 0)
+    harmless = stats.get("harmless", 0)
+    undetected = stats.get("undetected", 0)
+    total_engines = malicious + suspicious + harmless + undetected
+    threats = malicious + suspicious
+
+    # Results table
+    hdr = [("Metrica", 24), ("Valor", 12)]
+    rows = [
+        [f"{C.R}Malicioso{C.RST}", f"{C.R}{C.BLD}{malicious}{C.RST}"],
+        [f"{C.Y}Suspeito{C.RST}", f"{C.Y}{C.BLD}{suspicious}{C.RST}"],
+        [f"{C.G}Limpo{C.RST}", f"{C.G}{C.BLD}{harmless}{C.RST}"],
+        [f"{C.DIM}Nao detetado{C.RST}", f"{C.DIM}{undetected}{C.RST}"],
+        ["", ""],
+        [f"{C.W}{C.BLD}Total de motores{C.RST}", f"{C.W}{C.BLD}{total_engines}{C.RST}"],
+    ]
+    draw_table(hdr, rows)
+
+    # Verdict
+    print()
+    if threats == 0:
+        draw_box([
+            f"  {C.G}{C.BLD}FICHEIRO LIMPO{C.RST}",
+            "",
+            f"  {C.G}0/{total_engines} motores detetaram ameacas.{C.RST}",
+            f"  {C.DIM}Nenhuma deteção de malware registrada.{C.RST}",
+        ], width=w, title=f"{C.G}{C.BLD}VEREDICTO{C.RST}", bc=C.G)
+    elif threats <= 3:
+        draw_box([
+            f"  {C.Y}{C.BLD}FICHEIRO SUSPEITO{C.RST}",
+            "",
+            f"  {C.Y}{threats}/{total_engines} motores detetaram ameacas.{C.RST}",
+            f"  {C.DIM}Pode ser um falso positivo, mas tenha cuidado.{C.RST}",
+        ], width=w, title=f"{C.Y}{C.BLD}VEREDICTO{C.RST}", bc=C.Y)
+    else:
+        popular_threat = attrs.get("popular_threat_classification", {})
+        threat_label = popular_threat.get("suggested_threat_label", "Desconhecido")
+        draw_box([
+            f"  {C.R}{C.BLD}MALWARE DETETADO!{C.RST}",
+            "",
+            f"  {C.R}{threats}/{total_engines} motores detetaram ameacas!{C.RST}",
+            f"  {C.W}Classificacao: {C.R}{C.BLD}{threat_label}{C.RST}",
+            "",
+            f"  {C.Y}NAO execute este ficheiro!{C.RST}",
+        ], width=w, title=f"{C.R}{C.BLD}VEREDICTO{C.RST}", bc=C.R)
+
+    return {
+        "hash": file_hash, "file": filename, "size": filesize,
+        "malicious": malicious, "suspicious": suspicious,
+        "harmless": harmless, "undetected": undetected,
+        "threats": threats, "total_engines": total_engines,
+    }
+
+
+# ─────────────────────────────────────────────────────
 #  Full Audit
 # ─────────────────────────────────────────────────────
 
@@ -1349,30 +1910,47 @@ def _pause_and_clear():
 
 
 def run_full_audit(target):
-    """Run all 7 modules sequentially with pauses between them."""
+    """Run all modules sequentially with pauses, then export report."""
     w = get_panel_width()
+    all_results = {}
+
+    waf_res = run_waf_detector(target)
+    all_results["waf"] = waf_res
+    _pause_and_clear()
 
     port_res = run_port_scanner(target)
+    all_results["ports"] = port_res
     _pause_and_clear()
 
     hdr_res = run_header_analysis(target)
+    all_results["headers"] = hdr_res
     _pause_and_clear()
 
     fuzz_res = run_directory_fuzzer(target)
+    all_results["directories"] = fuzz_res
     _pause_and_clear()
 
     admin_res = run_admin_hunter(target)
+    all_results["admin_panels"] = admin_res
     _pause_and_clear()
 
     cve_res = run_cve_scanner(target)
+    all_results["cves"] = cve_res
     _pause_and_clear()
 
     cloud_res = run_cloud_checker(target)
+    all_results["cloud_buckets"] = cloud_res
     _pause_and_clear()
 
     surface_res = run_surface_mapper(target)
+    all_results["surface"] = surface_res
+    _pause_and_clear()
+
+    err_res = run_error_db_scanner(target)
+    all_results["error_db"] = err_res
 
     # Summary
+    wf = len(waf_res)
     op = len([r for r in port_res if r["is_open"]])
     mh = len(hdr_res.get("missing", []))
     ed = len([r for r in fuzz_res if r["hit"]])
@@ -1380,7 +1958,8 @@ def run_full_audit(target):
     cv = len(cve_res)
     pb = len([r for r in cloud_res if r.get("public")])
     sf = surface_res.get("total", 0)
-    total = op + mh + ed + ap + cv + pb + sf
+    er = len(err_res)
+    total = wf + op + mh + ed + ap + cv + pb + sf + er
 
     if total == 0:
         risk, rc = "BAIXO", C.G
@@ -1395,6 +1974,7 @@ def run_full_audit(target):
     draw_box([
         f"  {C.W}{C.BLD}Alvo: {target['hostname']}{C.RST} ({target['ip']})",
         "",
+        f"  {C.CY}WAFs detectados:     {C.R if wf else C.G}{C.BLD}{wf}{C.RST}",
         f"  {C.CY}Portas abertas:      {C.R if op else C.G}{C.BLD}{op}{C.RST}",
         f"  {C.CY}Headers ausentes:    {C.R if mh else C.G}{C.BLD}{mh}{C.RST}",
         f"  {C.CY}Diretorios expostos: {C.R if ed else C.G}{C.BLD}{ed}{C.RST}",
@@ -1402,10 +1982,15 @@ def run_full_audit(target):
         f"  {C.CY}CVEs encontradas:    {C.R if cv else C.G}{C.BLD}{cv}{C.RST}",
         f"  {C.CY}Buckets publicos:    {C.R if pb else C.G}{C.BLD}{pb}{C.RST}",
         f"  {C.CY}Superficie ataque:   {C.R if sf else C.G}{C.BLD}{sf}{C.RST}",
+        f"  {C.CY}Erros de BD:         {C.R if er else C.G}{C.BLD}{er}{C.RST}",
         "",
         f"  {C.W}Total de achados: {rc}{C.BLD}{total}{C.RST}",
         f"  {C.W}Nivel de risco:   {rc}{C.BLD}{risk}{C.RST}",
     ], width=w, title=f"{C.CY}{C.BLD}RESUMO DA AUDITORIA{C.RST}")
+
+    # Export JSON report
+    print()
+    export_report(target, all_results)
 
 
 # ─────────────────────────────────────────────────────
@@ -1443,8 +2028,17 @@ def show_help():
         f"  {C.W}{C.BLD}[6] Verificador de Buckets{C.RST}",
         f"  {C.DIM}Checa buckets S3, Azure, GCS expostos.{C.RST}",
         "",
-        f"  {C.W}{C.BLD}[7] Mapeador de Superficie de Ataque{C.RST}",
+        f"  {C.W}{C.BLD}[7] Detetor de WAF{C.RST}",
+        f"  {C.DIM}Analisa firewalls de aplicacao web.{C.RST}",
+        "",
+        f"  {C.W}{C.BLD}[8] Scanner de Erros de BD{C.RST}",
+        f"  {C.DIM}Detecta divulgacao de erros de banco de dados.{C.RST}",
+        "",
+        f"  {C.W}{C.BLD}[9] Mapeador de Superficie de Ataque{C.RST}",
         f"  {C.DIM}Paineis de BD, parametros e erros expostos.{C.RST}",
+        "",
+        f"  {C.W}{C.BLD}[10] Scanner de Malware (Local){C.RST}",
+        f"  {C.DIM}Analisa ficheiros via SHA-256 + VirusTotal.{C.RST}",
     ], width=w, title=f"{C.CY}{C.BLD}MODULOS{C.RST}")
 
     print()
@@ -1469,7 +2063,7 @@ def show_menu():
     w = get_panel_width()
     draw_box([
         f"  {C.CY}{C.BLD}[1]{C.RST}  {C.W}{C.BLD}Auditoria Completa{C.RST}",
-        f"       {C.DIM}Todos os 7 modulos de uma vez{C.RST}",
+        f"       {C.DIM}Todos os modulos + relatorio JSON{C.RST}",
         "",
         f"  {C.CY}{C.BLD}[2]{C.RST}  {C.W}{C.BLD}Escanear Portas{C.RST}",
         f"       {C.DIM}Testa conexoes TCP nas portas criticas{C.RST}",
@@ -1478,7 +2072,7 @@ def show_menu():
         f"       {C.DIM}Analisa headers de seguranca do servidor{C.RST}",
         "",
         f"  {C.CY}{C.BLD}[4]{C.RST}  {C.W}{C.BLD}Cacar Diretorios Ocultos{C.RST}",
-        f"       {C.DIM}Fuzzing em rotas sensiveis{C.RST}",
+        f"       {C.DIM}Fuzzing + calibracao soft-404{C.RST}",
         "",
         f"  {C.CY}{C.BLD}[5]{C.RST}  {C.W}{C.BLD}Cacar Paineis de Admin{C.RST}",
         f"       {C.DIM}Detecta paineis + fingerprint de CMS{C.RST}",
@@ -1489,10 +2083,19 @@ def show_menu():
         f"  {C.CY}{C.BLD}[7]{C.RST}  {C.W}{C.BLD}Verificador de Buckets na Nuvem{C.RST}",
         f"       {C.DIM}Checa S3, Azure Blob, Google GCS{C.RST}",
         "",
-        f"  {C.CY}{C.BLD}[8]{C.RST}  {C.W}{C.BLD}Mapeador de Superficie de Ataque{C.RST}",
+        f"  {C.CY}{C.BLD}[8]{C.RST}  {C.W}{C.BLD}Detetor de WAF{C.RST}",
+        f"       {C.DIM}Identifica firewalls de aplicacao{C.RST}",
+        "",
+        f"  {C.CY}{C.BLD}[9]{C.RST}  {C.W}{C.BLD}Scanner de Erros de BD{C.RST}",
+        f"       {C.DIM}Detecta divulgacao de erros de BD{C.RST}",
+        "",
+        f"  {C.CY}{C.BLD}[10]{C.RST} {C.W}{C.BLD}Mapeador de Superficie{C.RST}",
         f"       {C.DIM}Paineis de BD + parametros + erros{C.RST}",
         "",
-        f"  {C.CY}{C.BLD}[9]{C.RST}  {C.W}{C.BLD}Ajuda / Sobre{C.RST}",
+        f"  {C.CY}{C.BLD}[11]{C.RST} {C.W}{C.BLD}Scanner de Malware (Local){C.RST}",
+        f"       {C.DIM}Analisa ficheiros via VirusTotal{C.RST}",
+        "",
+        f"  {C.CY}{C.BLD}[12]{C.RST} {C.W}{C.BLD}Ajuda / Sobre{C.RST}",
         f"       {C.DIM}Conceitos e uso legal{C.RST}",
         "",
         f"  {C.R}{C.BLD}[0]{C.RST}  {C.DIM}Sair{C.RST}",
@@ -1517,6 +2120,10 @@ def run_scan_module(choice, target):
     elif choice == "7":
         run_cloud_checker(target)
     elif choice == "8":
+        run_waf_detector(target)
+    elif choice == "9":
+        run_error_db_scanner(target)
+    elif choice == "10":
         run_surface_mapper(target)
 
 
@@ -1550,14 +2157,22 @@ def main():
             print()
             break
 
-        elif choice == "9":
+        elif choice == "11":
+            # File Malware Scanner — dedicated flow (no network target)
+            clear_screen()
+            run_file_scanner()
+            print()
+            input(f"  {C.DIM}Pressione Enter para voltar ao menu...{C.RST}")
+            continue
+
+        elif choice == "12":
             clear_screen()
             show_help()
             print()
             input(f"  {C.DIM}Pressione Enter para voltar ao menu...{C.RST}")
             continue
 
-        elif choice in ("1", "2", "3", "4", "5", "6", "7", "8"):
+        elif choice in ("1", "2", "3", "4", "5", "6", "7", "8", "9", "10"):
             clear_screen()
             print(BANNER_MINI)
             target = prompt_target()
@@ -1575,7 +2190,7 @@ def main():
             print()
             draw_box([
                 f"  {C.R}Opcao '{choice}' invalida.{C.RST}",
-                f"  {C.DIM}Digite um numero de 0 a 9.{C.RST}",
+                f"  {C.DIM}Digite um numero de 0 a 12.{C.RST}",
             ], width=get_panel_width(), title=f"{C.R}{C.BLD}ERRO{C.RST}", bc=C.R)
             time.sleep(1.5)
 
