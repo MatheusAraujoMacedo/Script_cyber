@@ -23,6 +23,7 @@ import string
 import hashlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse
+import argparse
 
 try:
     import requests
@@ -477,13 +478,26 @@ def _fuzz_path(base, path, timeout):
         return {"path": path, "code": None, "hit": False, "clen": 0}
 
 
-def run_directory_fuzzer(target, timeout=5, threads=10):
+def run_directory_fuzzer(target, timeout=5, threads=10, wordlist_path=None):
     w = get_panel_width()
     print(BANNER_MINI)
-    draw_box([
-        f"  {C.W}Alvo:     {C.BLD}{target['url']}{C.RST}",
-        f"  {C.W}Wordlist: {C.BLD}{len(FUZZ_PATHS)}{C.RST} rotas | Threads: {C.BLD}{threads}{C.RST}",
-    ], width=w, title=f"{C.CY}{C.BLD}CACA-DIRETORIOS{C.RST}")
+
+    # Load wordlist: external file or built-in
+    if wordlist_path and os.path.isfile(wordlist_path):
+        with open(wordlist_path, "r", encoding="utf-8", errors="ignore") as f:
+            paths = [line.strip() for line in f if line.strip()]
+            paths = [p if p.startswith("/") else "/" + p for p in paths]
+        draw_box([
+            f"  {C.W}Alvo:     {C.BLD}{target['url']}{C.RST}",
+            f"  {C.W}Wordlist: {C.BLD}{wordlist_path}{C.RST} ({len(paths)} rotas)",
+            f"  {C.W}Threads:  {C.BLD}{threads}{C.RST}",
+        ], width=w, title=f"{C.CY}{C.BLD}CACA-DIRETORIOS{C.RST}")
+    else:
+        paths = FUZZ_PATHS
+        draw_box([
+            f"  {C.W}Alvo:     {C.BLD}{target['url']}{C.RST}",
+            f"  {C.W}Wordlist: {C.BLD}{len(paths)}{C.RST} rotas (embutida) | Threads: {C.BLD}{threads}{C.RST}",
+        ], width=w, title=f"{C.CY}{C.BLD}CACA-DIRETORIOS{C.RST}")
 
     # Baseline calibration: detect soft-404 / catch-all pages
     print()
@@ -506,7 +520,7 @@ def run_directory_fuzzer(target, timeout=5, threads=10):
     t0 = time.time()
     results = []
     with ThreadPoolExecutor(max_workers=threads) as ex:
-        futs = {ex.submit(_fuzz_path, target["url"], p, timeout): p for p in FUZZ_PATHS}
+        futs = {ex.submit(_fuzz_path, target["url"], p, timeout): p for p in paths}
         for f in as_completed(futs):
             try:
                 results.append(f.result())
@@ -1679,7 +1693,190 @@ def run_surface_mapper(target, timeout=5, threads=10):
 
 
 # ─────────────────────────────────────────────────────
-#  Module 10: File Malware Scanner (VirusTotal)
+#  Module 10: Passive Subdomain Enumeration (crt.sh)
+# ─────────────────────────────────────────────────────
+
+def run_subdomain_enum(target, timeout=15):
+    """Enumerate subdomains passively via crt.sh Certificate Transparency."""
+    w = get_panel_width()
+    print(BANNER_MINI)
+    domain = target["hostname"]
+    draw_box([
+        f"  {C.W}Dominio: {C.BLD}{domain}{C.RST}",
+        f"  {C.DIM}Consulta passiva ao crt.sh (Certificate Transparency).{C.RST}",
+        f"  {C.DIM}Nao toca no servidor alvo — apenas OSINT publico.{C.RST}",
+    ], width=w, title=f"{C.CY}{C.BLD}ENUMERACAO DE SUBDOMINIOS{C.RST}")
+
+    print()
+    sp = Spinner("Consultando crt.sh...")
+    sp.start()
+    try:
+        resp = requests.get(
+            f"https://crt.sh/?q=%.{domain}&output=json",
+            timeout=timeout, headers={"User-Agent": _random_ua()}
+        )
+    except (Timeout, ConnectionError, RequestException) as e:
+        sp.stop()
+        draw_box([f"  {C.R}Falha na conexao com crt.sh: {e}{C.RST}"],
+                 width=w, title=f"{C.R}{C.BLD}ERRO{C.RST}", bc=C.R)
+        return []
+    sp.stop(f"Resposta: HTTP {resp.status_code}")
+
+    if resp.status_code != 200:
+        print()
+        draw_box([f"  {C.R}crt.sh retornou HTTP {resp.status_code}{C.RST}"],
+                 width=w, title=f"{C.R}{C.BLD}ERRO{C.RST}", bc=C.R)
+        return []
+
+    # Parse and deduplicate subdomains
+    try:
+        entries = resp.json()
+    except (json.JSONDecodeError, ValueError):
+        print()
+        draw_box([f"  {C.R}Resposta invalida do crt.sh.{C.RST}"],
+                 width=w, title=f"{C.R}{C.BLD}ERRO{C.RST}", bc=C.R)
+        return []
+
+    subdomains = set()
+    for entry in entries:
+        name = entry.get("name_value", "")
+        for sub in name.split("\n"):
+            sub = sub.strip().lower()
+            if sub and "*" not in sub and sub.endswith(domain):
+                subdomains.add(sub)
+
+    subdomains = sorted(subdomains)
+
+    # Display results
+    print()
+    if subdomains:
+        hdr = [("Subdominio", 44), ("Status", 10)]
+        rows = []
+        for sd in subdomains:
+            if sd == domain:
+                rows.append([f"{C.W}{sd}{C.RST}", f"{C.DIM}principal{C.RST}"])
+            else:
+                rows.append([f"{C.CY}{sd}{C.RST}", f"{C.G}encontrado{C.RST}"])
+        draw_table(hdr, rows)
+        print()
+        draw_box([
+            f"  {C.CY}{C.BLD}{len(subdomains)} subdominio(s) encontrado(s){C.RST}",
+            f"  {C.DIM}Fonte: Certificate Transparency (crt.sh){C.RST}",
+        ], width=w, title=f"{C.CY}{C.BLD}RESULTADO{C.RST}")
+    else:
+        draw_box([
+            f"  {C.G}Nenhum subdominio encontrado para {domain}.{C.RST}",
+        ], width=w, title=f"{C.G}{C.BLD}RESULTADO{C.RST}", bc=C.G)
+
+    return subdomains
+
+
+# ─────────────────────────────────────────────────────
+#  Module 11: Technology / CMS Fingerprinting
+# ─────────────────────────────────────────────────────
+
+_TECH_PATTERNS = [
+    # (pattern_in_body_or_headers, tech_name, category)
+    ("wp-content", "WordPress", "CMS"),
+    ("wp-includes", "WordPress", "CMS"),
+    ("wp-json", "WordPress", "CMS"),
+    ("/joomla", "Joomla", "CMS"),
+    ("Drupal", "Drupal", "CMS"),
+    ("Magento", "Magento", "CMS"),
+    ("Shopify", "Shopify", "CMS/E-commerce"),
+    ("Wix.com", "Wix", "CMS"),
+    ("squarespace", "Squarespace", "CMS"),
+    ("react", "React", "Frontend"),
+    ("__next", "Next.js", "Frontend"),
+    ("_nuxt", "Nuxt.js", "Frontend"),
+    ("ng-version", "Angular", "Frontend"),
+    ("vue.js", "Vue.js", "Frontend"),
+    ("jquery", "jQuery", "Frontend"),
+    ("bootstrap", "Bootstrap", "CSS"),
+    ("tailwindcss", "TailwindCSS", "CSS"),
+    ("laravel", "Laravel", "Backend"),
+    ("csrfmiddlewaretoken", "Django", "Backend"),
+    ("__rails", "Ruby on Rails", "Backend"),
+    ("express", "Express.js", "Backend"),
+    ("phpmyadmin", "phpMyAdmin", "Database"),
+    ("google-analytics", "Google Analytics", "Analytics"),
+    ("gtag", "Google Tag Manager", "Analytics"),
+    ("cloudflare", "Cloudflare", "CDN/WAF"),
+    ("recaptcha", "reCAPTCHA", "Security"),
+]
+
+
+def run_tech_fingerprint(target, timeout=10):
+    """Fingerprint technologies by analyzing headers and HTML body."""
+    w = get_panel_width()
+    print(BANNER_MINI)
+    draw_box([
+        f"  {C.W}Alvo: {C.BLD}{target['url']}{C.RST}",
+        f"  {C.DIM}Analisa headers e HTML para identificar tecnologias.{C.RST}",
+    ], width=w, title=f"{C.CY}{C.BLD}FINGERPRINTING DE TECNOLOGIAS{C.RST}")
+
+    print()
+    sp = Spinner("Analisando tecnologias...")
+    sp.start()
+    try:
+        resp = _vr_get(target["url"], timeout=timeout)
+        body = resp.text[:30000].lower()
+        raw_headers = str(resp.headers).lower()
+    except (Timeout, ConnectionError, RequestException) as e:
+        sp.stop()
+        draw_box([f"  {C.R}Falha na conexao: {e}{C.RST}"],
+                 width=w, title=f"{C.R}{C.BLD}ERRO{C.RST}", bc=C.R)
+        return []
+    sp.stop("Pagina analisada")
+
+    detected = []
+
+    # Check Server header
+    server = resp.headers.get("Server", "")
+    if server:
+        detected.append({"tech": server, "category": "Servidor", "source": "Header: Server"})
+
+    # Check X-Powered-By
+    powered = resp.headers.get("X-Powered-By", "")
+    if powered:
+        detected.append({"tech": powered, "category": "Backend", "source": "Header: X-Powered-By"})
+
+    # Check meta generator tag
+    gen_match = re.search(r'<meta[^>]+name=["\']generator["\'][^>]+content=["\']([^"\'>]+)', body)
+    if gen_match:
+        detected.append({"tech": gen_match.group(1), "category": "CMS", "source": "Meta: generator"})
+
+    # Check body and headers against known patterns
+    search_text = body + raw_headers
+    seen = set()
+    for pattern, tech_name, category in _TECH_PATTERNS:
+        if pattern.lower() in search_text and tech_name not in seen:
+            seen.add(tech_name)
+            detected.append({"tech": tech_name, "category": category, "source": "HTML/Headers"})
+
+    # Display results
+    print()
+    if detected:
+        hdr = [("Tecnologia", 22), ("Categoria", 16), ("Fonte", 18)]
+        rows = []
+        for d in detected:
+            t = d["tech"][:20] + ".." if len(d["tech"]) > 22 else d["tech"]
+            rows.append([f"{C.CY}{C.BLD}{t}{C.RST}", d["category"], f"{C.DIM}{d['source']}{C.RST}"])
+        draw_table(hdr, rows)
+        print()
+        draw_box([
+            f"  {C.CY}{C.BLD}{len(detected)} tecnologia(s) identificada(s){C.RST}",
+        ], width=w, title=f"{C.CY}{C.BLD}RESULTADO{C.RST}")
+    else:
+        draw_box([
+            f"  {C.G}Nenhuma tecnologia identificada.{C.RST}",
+        ], width=w, title=f"{C.G}{C.BLD}RESULTADO{C.RST}", bc=C.G)
+
+    return detected
+
+
+# ─────────────────────────────────────────────────────
+#  Module 12: File Malware Scanner (VirusTotal)
 # ─────────────────────────────────────────────────────
 
 def _calculate_sha256(filepath, chunk_size=65536):
@@ -2039,7 +2236,22 @@ def show_help():
         "",
         f"  {C.W}{C.BLD}[10] Scanner de Malware (Local){C.RST}",
         f"  {C.DIM}Analisa ficheiros via SHA-256 + VirusTotal.{C.RST}",
+        "",
+        f"  {C.W}{C.BLD}[11] Enumeracao de Subdominios{C.RST}",
+        f"  {C.DIM}OSINT passivo via crt.sh (Certificate Transparency).{C.RST}",
+        "",
+        f"  {C.W}{C.BLD}[12] Fingerprinting de Tecnologias{C.RST}",
+        f"  {C.DIM}Identifica CMS, frameworks e servidores.{C.RST}",
     ], width=w, title=f"{C.CY}{C.BLD}MODULOS{C.RST}")
+
+    print()
+    draw_box([
+        f"  {C.W}{C.BLD}Modo Headless (CLI):{C.RST}",
+        f"  {C.DIM}python vulnrecon.py alvo.com --all{C.RST}",
+        f"  {C.DIM}python vulnrecon.py alvo.com --ports --headers{C.RST}",
+        f"  {C.DIM}python vulnrecon.py alvo.com --export relatorio.json{C.RST}",
+        f"  {C.DIM}Use --help para ver todas as flags.{C.RST}",
+    ], width=w, title=f"{C.CY}{C.BLD}USO VIA TERMINAL{C.RST}")
 
     print()
     draw_box([
@@ -2095,7 +2307,13 @@ def show_menu():
         f"  {C.CY}{C.BLD}[11]{C.RST} {C.W}{C.BLD}Scanner de Malware (Local){C.RST}",
         f"       {C.DIM}Analisa ficheiros via VirusTotal{C.RST}",
         "",
-        f"  {C.CY}{C.BLD}[12]{C.RST} {C.W}{C.BLD}Ajuda / Sobre{C.RST}",
+        f"  {C.CY}{C.BLD}[12]{C.RST} {C.W}{C.BLD}Enumeracao de Subdominios{C.RST}",
+        f"       {C.DIM}OSINT passivo via crt.sh{C.RST}",
+        "",
+        f"  {C.CY}{C.BLD}[13]{C.RST} {C.W}{C.BLD}Fingerprinting de Tecnologias{C.RST}",
+        f"       {C.DIM}Identifica CMS, frameworks e servidores{C.RST}",
+        "",
+        f"  {C.CY}{C.BLD}[14]{C.RST} {C.W}{C.BLD}Ajuda / Sobre{C.RST}",
         f"       {C.DIM}Conceitos e uso legal{C.RST}",
         "",
         f"  {C.R}{C.BLD}[0]{C.RST}  {C.DIM}Sair{C.RST}",
@@ -2125,16 +2343,151 @@ def run_scan_module(choice, target):
         run_error_db_scanner(target)
     elif choice == "10":
         run_surface_mapper(target)
+    elif choice == "12":
+        run_subdomain_enum(target)
+    elif choice == "13":
+        run_tech_fingerprint(target)
 
 
 # ─────────────────────────────────────────────────────
-#  Main Entry Point
+#  Argparse (Headless CLI Mode)
 # ─────────────────────────────────────────────────────
 
-def main():
-    """Main interactive loop."""
+def build_parser():
+    """Build the argparse parser for headless CLI mode."""
+    parser = argparse.ArgumentParser(
+        prog="vulnrecon",
+        description="VulnRecon — Ferramenta de Auditoria de Seguranca CLI",
+        epilog="Exemplo: python vulnrecon.py scanme.nmap.org --all --export relatorio.json",
+    )
+    parser.add_argument("target", nargs="?", default=None,
+                        help="URL ou IP do alvo (ex: scanme.nmap.org)")
+
+    # Scan module flags
+    scan = parser.add_argument_group("Modulos de Scan")
+    scan.add_argument("--all", action="store_true", help="Executa todos os modulos")
+    scan.add_argument("--ports", action="store_true", help="Scanner de portas TCP")
+    scan.add_argument("--headers", action="store_true", help="Analise de cabecalhos HTTP")
+    scan.add_argument("--fuzz", action="store_true", help="Fuzzing de diretorios")
+    scan.add_argument("--admin", action="store_true", help="Caca-paineis de admin")
+    scan.add_argument("--cves", action="store_true", help="Scanner de CVEs (NVD)")
+    scan.add_argument("--buckets", action="store_true", help="Verificador de cloud buckets")
+    scan.add_argument("--waf", action="store_true", help="Detetor de WAF")
+    scan.add_argument("--errors", action="store_true", help="Scanner de erros de BD")
+    scan.add_argument("--surface", action="store_true", help="Mapeador de superficie de ataque")
+    scan.add_argument("--subdomains", action="store_true", help="Enumeracao de subdominios (crt.sh)")
+    scan.add_argument("--tech", action="store_true", help="Fingerprinting de tecnologias")
+
+    # Configuration flags
+    config = parser.add_argument_group("Configuracao")
+    config.add_argument("--threads", type=int, default=10, help="Numero de threads (default: 10)")
+    config.add_argument("--timeout", type=int, default=5, help="Timeout em segundos (default: 5)")
+    config.add_argument("--delay", type=float, default=None, help="Delay entre requests em segundos")
+    config.add_argument("--wordlist", type=str, default=None, help="Wordlist externa para fuzzing (.txt)")
+    config.add_argument("--export", type=str, default=None, help="Exportar relatorio JSON (ex: report.json)")
+
+    return parser
+
+
+def run_headless(args):
+    """Run VulnRecon in headless (CLI) mode based on argparse flags."""
+    global THROTTLE_DELAY
     setup_console()
 
+    # Apply delay if specified
+    if args.delay is not None:
+        THROTTLE_DELAY = args.delay
+
+    # Resolve target
+    print(BANNER_MINI)
+    target = resolve_target(args.target)
+    if target is None:
+        print(f"  {C.R}Erro: nao foi possivel resolver '{args.target}'{C.RST}")
+        sys.exit(1)
+
+    draw_box([
+        f"  {C.W}Alvo: {C.BLD}{target['url']}{C.RST}",
+        f"  {C.W}IP:   {C.BLD}{target['ip']}{C.RST}",
+        f"  {C.DIM}Threads: {args.threads} | Timeout: {args.timeout}s{C.RST}",
+    ], width=get_panel_width(), title=f"{C.CY}{C.BLD}VULNRECON HEADLESS{C.RST}")
+
+    all_results = {}
+    run_all = args.all
+
+    if run_all or args.waf:
+        print()
+        res = run_waf_detector(target, timeout=args.timeout)
+        all_results["waf"] = res
+
+    if run_all or args.ports:
+        print()
+        res = run_port_scanner(target, timeout=args.timeout, threads=args.threads)
+        all_results["ports"] = res
+
+    if run_all or args.headers:
+        print()
+        res = run_header_analysis(target, timeout=args.timeout)
+        all_results["headers"] = res
+
+    if run_all or args.fuzz:
+        print()
+        res = run_directory_fuzzer(target, timeout=args.timeout, threads=args.threads,
+                                  wordlist_path=args.wordlist)
+        all_results["directories"] = res
+
+    if run_all or args.admin:
+        print()
+        res = run_admin_hunter(target, timeout=args.timeout, threads=args.threads)
+        all_results["admin_panels"] = res
+
+    if run_all or args.cves:
+        print()
+        res = run_cve_scanner(target, timeout=args.timeout)
+        all_results["cves"] = res
+
+    if run_all or args.buckets:
+        print()
+        res = run_cloud_checker(target, timeout=args.timeout, threads=args.threads)
+        all_results["cloud_buckets"] = res
+
+    if run_all or args.surface:
+        print()
+        res = run_surface_mapper(target, timeout=args.timeout)
+        all_results["surface"] = res
+
+    if run_all or args.errors:
+        print()
+        res = run_error_db_scanner(target, timeout=args.timeout)
+        all_results["error_db"] = res
+
+    if run_all or args.subdomains:
+        print()
+        res = run_subdomain_enum(target, timeout=args.timeout)
+        all_results["subdomains"] = [s for s in res] if res else []
+
+    if run_all or args.tech:
+        print()
+        res = run_tech_fingerprint(target, timeout=args.timeout)
+        all_results["technologies"] = res
+
+    # Export report if --export flag is set
+    export_path = args.export
+    if export_path:
+        print()
+        export_report(target, all_results, output_path=export_path)
+    elif run_all:
+        print()
+        export_report(target, all_results)
+
+    print()
+
+
+# ─────────────────────────────────────────────────────
+#  Interactive Mode
+# ─────────────────────────────────────────────────────
+
+def run_interactive():
+    """Main interactive menu loop."""
     while True:
         clear_screen()
         print(BANNER)
@@ -2165,14 +2518,14 @@ def main():
             input(f"  {C.DIM}Pressione Enter para voltar ao menu...{C.RST}")
             continue
 
-        elif choice == "12":
+        elif choice == "14":
             clear_screen()
             show_help()
             print()
             input(f"  {C.DIM}Pressione Enter para voltar ao menu...{C.RST}")
             continue
 
-        elif choice in ("1", "2", "3", "4", "5", "6", "7", "8", "9", "10"):
+        elif choice in ("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "12", "13"):
             clear_screen()
             print(BANNER_MINI)
             target = prompt_target()
@@ -2186,14 +2539,36 @@ def main():
             continue
 
         else:
-            # Invalid input — show styled error
+            # Invalid input
             print()
             draw_box([
                 f"  {C.R}Opcao '{choice}' invalida.{C.RST}",
-                f"  {C.DIM}Digite um numero de 0 a 12.{C.RST}",
+                f"  {C.DIM}Digite um numero de 0 a 14.{C.RST}",
             ], width=get_panel_width(), title=f"{C.R}{C.BLD}ERRO{C.RST}", bc=C.R)
             time.sleep(1.5)
 
 
+# ─────────────────────────────────────────────────────
+#  Main Entry Point
+# ─────────────────────────────────────────────────────
+
+def main():
+    """Hybrid entry point: headless if CLI args provided, interactive otherwise."""
+    setup_console()
+
+    parser = build_parser()
+
+    # If no arguments at all → interactive mode
+    if len(sys.argv) == 1:
+        run_interactive()
+    else:
+        args = parser.parse_args()
+        if args.target:
+            run_headless(args)
+        else:
+            parser.print_help()
+
+
 if __name__ == "__main__":
     main()
+
