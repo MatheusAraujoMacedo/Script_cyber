@@ -98,4 +98,4 @@ Este projeto está sob a licença MIT. Veja o arquivo LICENSE para mais detalhes
 1. **O Título e a Descrição:** Foram atualizados para refletir um produto maduro, utilizando palavras-chave como *Enterprise, Red Team, DevSecOps e DAST* em vez de apenas "script de terminal".
 2. **A Tabela de Funcionalidades:** Reflete agora a migração para `aiohttp/asyncio`, a capacidade de rodar com sessão iniciada (DAST), as opções de *stealth* e os *exit codes* que quebram pipelines.
 3. **Novos Exemplos CLI:** O utilizador que lê o README percebe imediatamente que a ferramenta aceita *proxies*, *wordlists* externas, *cookies* e que gera relatórios em HTML.
-4. **Secção DevSecOps:** A inclusão de um exemplo prático em YAML atrai recrutadores da área de
+4. **Secção DevSecOps:** A inclusão de um exemplo prático em YAML atrai recrutadores da área de Cloud e Infraestrutura, mostrando que pensa no ciclo de vida do software corporativo.
