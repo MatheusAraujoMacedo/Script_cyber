@@ -1,0 +1,936 @@
+{
+  "tool": "VulnRecon",
+  "version": "4.0",
+  "timestamp": "2026-03-18 20:08:05 Hora oficial do Brasil",
+  "target": {
+    "hostname": "www.linkedin.com",
+    "ip": "104.18.41.41",
+    "url": "https://www.linkedin.com/feed/"
+  },
+  "results": {
+    "waf": [
+      {
+        "waf": "Cloudflare",
+        "evidence": "cloudflare",
+        "method": "Headers"
+      },
+      {
+        "waf": "F5 BIG-IP",
+        "evidence": "f5",
+        "method": "Headers"
+      }
+    ],
+    "ports": [
+      {
+        "port": 21,
+        "service": "FTP",
+        "is_open": false
+      },
+      {
+        "port": 22,
+        "service": "SSH",
+        "is_open": false
+      },
+      {
+        "port": 23,
+        "service": "Telnet",
+        "is_open": false
+      },
+      {
+        "port": 25,
+        "service": "SMTP",
+        "is_open": false
+      },
+      {
+        "port": 53,
+        "service": "DNS",
+        "is_open": false
+      },
+      {
+        "port": 80,
+        "service": "HTTP",
+        "is_open": true
+      },
+      {
+        "port": 110,
+        "service": "POP3",
+        "is_open": false
+      },
+      {
+        "port": 143,
+        "service": "IMAP",
+        "is_open": false
+      },
+      {
+        "port": 443,
+        "service": "HTTPS",
+        "is_open": true
+      },
+      {
+        "port": 445,
+        "service": "SMB",
+        "is_open": false
+      },
+      {
+        "port": 993,
+        "service": "IMAPS",
+        "is_open": false
+      },
+      {
+        "port": 995,
+        "service": "POP3S",
+        "is_open": false
+      },
+      {
+        "port": 3306,
+        "service": "MySQL",
+        "is_open": false
+      },
+      {
+        "port": 3389,
+        "service": "RDP",
+        "is_open": false
+      },
+      {
+        "port": 5432,
+        "service": "PostgreSQL",
+        "is_open": false
+      },
+      {
+        "port": 5900,
+        "service": "VNC",
+        "is_open": false
+      },
+      {
+        "port": 6379,
+        "service": "Redis",
+        "is_open": false
+      },
+      {
+        "port": 8080,
+        "service": "HTTP-Alt",
+        "is_open": true
+      },
+      {
+        "port": 8443,
+        "service": "HTTPS-Alt",
+        "is_open": true
+      },
+      {
+        "port": 27017,
+        "service": "MongoDB",
+        "is_open": false
+      }
+    ],
+    "headers": {
+      "present": [
+        "Strict-Transport-Security",
+        "X-Frame-Options",
+        "X-Content-Type-Options",
+        "Content-Security-Policy"
+      ],
+      "missing": [
+        "X-XSS-Protection",
+        "Referrer-Policy",
+        "Permissions-Policy"
+      ],
+      "error": false
+    },
+    "directories": [
+      {
+        "path": "/.env",
+        "code": 302,
+        "hit": true,
+        "clen": 0
+      },
+      {
+        "path": "/.env.bak",
+        "code": 302,
+        "hit": true,
+        "clen": 0
+      },
+      {
+        "path": "/.git/",
+        "code": 302,
+        "hit": true,
+        "clen": 0
+      },
+      {
+        "path": "/.git/config",
+        "code": 302,
+        "hit": true,
+        "clen": 0
+      },
+      {
+        "path": "/.gitignore",
+        "code": 302,
+        "hit": true,
+        "clen": 0
+      },
+      {
+        "path": "/.hg/",
+        "code": 302,
+        "hit": true,
+        "clen": 0
+      },
+      {
+        "path": "/.htaccess",
+        "code": 302,
+        "hit": true,
+        "clen": 0
+      },
+      {
+        "path": "/.htpasswd",
+        "code": 302,
+        "hit": true,
+        "clen": 0
+      },
+      {
+        "path": "/.svn/",
+        "code": 302,
+        "hit": true,
+        "clen": 0
+      },
+      {
+        "path": "/.well-known/security.txt",
+        "code": 302,
+        "hit": true,
+        "clen": 0
+      },
+      {
+        "path": "/admin",
+        "code": 302,
+        "hit": true,
+        "clen": 0
+      },
+      {
+        "path": "/admin/",
+        "code": 302,
+        "hit": true,
+        "clen": 0
+      },
+      {
+        "path": "/administrator/",
+        "code": 302,
+        "hit": true,
+        "clen": 0
+      },
+      {
+        "path": "/api/",
+        "code": 302,
+        "hit": true,
+        "clen": 0
+      },
+      {
+        "path": "/api/v1/",
+        "code": 302,
+        "hit": true,
+        "clen": 0
+      },
+      {
+        "path": "/backup.tar.gz",
+        "code": 302,
+        "hit": true,
+        "clen": 0
+      },
+      {
+        "path": "/backup.zip",
+        "code": 302,
+        "hit": true,
+        "clen": 0
+      },
+      {
+        "path": "/config.php",
+        "code": 302,
+        "hit": true,
+        "clen": 0
+      },
+      {
+        "path": "/config.yml",
+        "code": 302,
+        "hit": true,
+        "clen": 0
+      },
+      {
+        "path": "/cpanel",
+        "code": 302,
+        "hit": true,
+        "clen": 0
+      },
+      {
+        "path": "/crossdomain.xml",
+        "code": 302,
+        "hit": true,
+        "clen": 0
+      },
+      {
+        "path": "/database.sql",
+        "code": 302,
+        "hit": true,
+        "clen": 0
+      },
+      {
+        "path": "/db.sql",
+        "code": 302,
+        "hit": true,
+        "clen": 0
+      },
+      {
+        "path": "/dump.sql",
+        "code": 302,
+        "hit": true,
+        "clen": 0
+      },
+      {
+        "path": "/graphql",
+        "code": 302,
+        "hit": true,
+        "clen": 0
+      },
+      {
+        "path": "/humans.txt",
+        "code": 302,
+        "hit": true,
+        "clen": 0
+      },
+      {
+        "path": "/info.php",
+        "code": 302,
+        "hit": true,
+        "clen": 0
+      },
+      {
+        "path": "/openapi.json",
+        "code": 200,
+        "hit": true,
+        "clen": 762303
+      },
+      {
+        "path": "/phpinfo.php",
+        "code": 302,
+        "hit": true,
+        "clen": 0
+      },
+      {
+        "path": "/phpmyadmin/",
+        "code": 302,
+        "hit": true,
+        "clen": 0
+      },
+      {
+        "path": "/robots.txt",
+        "code": 302,
+        "hit": true,
+        "clen": 0
+      },
+      {
+        "path": "/security.txt",
+        "code": 302,
+        "hit": true,
+        "clen": 0
+      },
+      {
+        "path": "/server-info",
+        "code": 302,
+        "hit": true,
+        "clen": 0
+      },
+      {
+        "path": "/server-status",
+        "code": 302,
+        "hit": true,
+        "clen": 0
+      },
+      {
+        "path": "/sitemap.xml",
+        "code": 302,
+        "hit": true,
+        "clen": 0
+      },
+      {
+        "path": "/swagger.json",
+        "code": 200,
+        "hit": true,
+        "clen": 762303
+      },
+      {
+        "path": "/web.config",
+        "code": 302,
+        "hit": true,
+        "clen": 0
+      },
+      {
+        "path": "/webmail",
+        "code": 302,
+        "hit": true,
+        "clen": 0
+      },
+      {
+        "path": "/wp-admin/",
+        "code": 302,
+        "hit": true,
+        "clen": 0
+      },
+      {
+        "path": "/wp-config.php",
+        "code": 302,
+        "hit": true,
+        "clen": 0
+      },
+      {
+        "path": "/wp-login.php",
+        "code": 302,
+        "hit": true,
+        "clen": 0
+      }
+    ],
+    "admin_panels": [
+      {
+        "path": "/admin",
+        "code": 200,
+        "cms": "Magento/Generic",
+        "found": true
+      },
+      {
+        "path": "/admin/",
+        "code": 200,
+        "cms": "Drupal/Generic",
+        "found": true
+      },
+      {
+        "path": "/admin/login",
+        "code": 200,
+        "cms": "Generic",
+        "found": true
+      },
+      {
+        "path": "/admin/login.php",
+        "code": 200,
+        "cms": "Generic PHP",
+        "found": true
+      },
+      {
+        "path": "/admin/login/?next=/admin/",
+        "code": 200,
+        "cms": "Django",
+        "found": true
+      },
+      {
+        "path": "/administrator/",
+        "code": 200,
+        "cms": "Joomla",
+        "found": true
+      },
+      {
+        "path": "/administrator/index.php",
+        "code": 200,
+        "cms": "Joomla",
+        "found": true
+      },
+      {
+        "path": "/adminpanel/",
+        "code": 200,
+        "cms": "Generic",
+        "found": true
+      },
+      {
+        "path": "/cms/",
+        "code": 200,
+        "cms": "Generic CMS",
+        "found": true
+      },
+      {
+        "path": "/cms/admin/",
+        "code": 200,
+        "cms": "Generic CMS",
+        "found": true
+      },
+      {
+        "path": "/controlpanel/",
+        "code": 200,
+        "cms": "Generic",
+        "found": true
+      },
+      {
+        "path": "/cpanel",
+        "code": 200,
+        "cms": "cPanel",
+        "found": true
+      },
+      {
+        "path": "/dashboard/",
+        "code": 200,
+        "cms": "Generic Dashboard",
+        "found": true
+      },
+      {
+        "path": "/host-manager/html",
+        "code": 200,
+        "cms": "Apache Tomcat",
+        "found": true
+      },
+      {
+        "path": "/index.php/admin/",
+        "code": 200,
+        "cms": "Magento",
+        "found": true
+      },
+      {
+        "path": "/login",
+        "code": 200,
+        "cms": "Generic",
+        "found": true
+      },
+      {
+        "path": "/login.php",
+        "code": 200,
+        "cms": "Generic PHP",
+        "found": true
+      },
+      {
+        "path": "/manager/html",
+        "code": 200,
+        "cms": "Apache Tomcat",
+        "found": true
+      },
+      {
+        "path": "/manager/status",
+        "code": 200,
+        "cms": "Apache Tomcat",
+        "found": true
+      },
+      {
+        "path": "/myadmin/",
+        "code": 200,
+        "cms": "phpMyAdmin",
+        "found": true
+      },
+      {
+        "path": "/nova/login",
+        "code": 200,
+        "cms": "Laravel Nova",
+        "found": true
+      },
+      {
+        "path": "/panel/",
+        "code": 200,
+        "cms": "Generic Panel",
+        "found": true
+      },
+      {
+        "path": "/phpmyadmin/",
+        "code": 200,
+        "cms": "phpMyAdmin",
+        "found": true
+      },
+      {
+        "path": "/phpmyadmin/index.php",
+        "code": 200,
+        "cms": "phpMyAdmin",
+        "found": true
+      },
+      {
+        "path": "/plesk/",
+        "code": 200,
+        "cms": "Plesk",
+        "found": true
+      },
+      {
+        "path": "/pma/",
+        "code": 200,
+        "cms": "phpMyAdmin",
+        "found": true
+      },
+      {
+        "path": "/rails/info",
+        "code": 200,
+        "cms": "Ruby on Rails",
+        "found": true
+      },
+      {
+        "path": "/user/login",
+        "code": 200,
+        "cms": "Drupal",
+        "found": true
+      },
+      {
+        "path": "/webmail",
+        "code": 200,
+        "cms": "cPanel Webmail",
+        "found": true
+      },
+      {
+        "path": "/webmin/",
+        "code": 200,
+        "cms": "Webmin",
+        "found": true
+      },
+      {
+        "path": "/whm/",
+        "code": 200,
+        "cms": "WHM (cPanel)",
+        "found": true
+      },
+      {
+        "path": "/wp-admin/",
+        "code": 200,
+        "cms": "WordPress",
+        "found": true
+      },
+      {
+        "path": "/wp-admin/install.php",
+        "code": 200,
+        "cms": "WordPress",
+        "found": true
+      },
+      {
+        "path": "/wp-login.php",
+        "code": 200,
+        "cms": "WordPress",
+        "found": true
+      }
+    ],
+    "cves": [],
+    "cloud_buckets": [
+      {
+        "url": "https://linkedin-static.s3.amazonaws.com",
+        "provider": "AWS S3",
+        "bucket": "linkedin-static",
+        "status": "PUBLICO",
+        "public": true,
+        "code": 200
+      },
+      {
+        "url": "https://linkedin.s3.amazonaws.com",
+        "provider": "AWS S3",
+        "bucket": "linkedin",
+        "status": "PRIVADO",
+        "public": false,
+        "code": 403
+      },
+      {
+        "url": "https://linkedin-assets.s3.amazonaws.com",
+        "provider": "AWS S3",
+        "bucket": "linkedin-assets",
+        "status": "PRIVADO",
+        "public": false,
+        "code": 403
+      },
+      {
+        "url": "https://linkedin-backup.s3.amazonaws.com",
+        "provider": "AWS S3",
+        "bucket": "linkedin-backup",
+        "status": "PRIVADO",
+        "public": false,
+        "code": 403
+      },
+      {
+        "url": "https://linkedin-data.s3.amazonaws.com",
+        "provider": "AWS S3",
+        "bucket": "linkedin-data",
+        "status": "PRIVADO",
+        "public": false,
+        "code": 403
+      },
+      {
+        "url": "https://linkedin-logs.s3.amazonaws.com",
+        "provider": "AWS S3",
+        "bucket": "linkedin-logs",
+        "status": "PRIVADO",
+        "public": false,
+        "code": 403
+      },
+      {
+        "url": "https://linkedin-media.s3.amazonaws.com",
+        "provider": "AWS S3",
+        "bucket": "linkedin-media",
+        "status": "PRIVADO",
+        "public": false,
+        "code": 403
+      },
+      {
+        "url": "https://linkedin-uploads.s3.amazonaws.com",
+        "provider": "AWS S3",
+        "bucket": "linkedin-uploads",
+        "status": "PRIVADO",
+        "public": false,
+        "code": 403
+      },
+      {
+        "url": "https://linkedindata.blob.core.windows.net",
+        "provider": "Azure Blob",
+        "bucket": "linkedindata",
+        "status": "PRIVADO",
+        "public": false,
+        "code": 403
+      },
+      {
+        "url": "https://storage.googleapis.com/linkedin",
+        "provider": "Google GCS",
+        "bucket": "linkedin",
+        "status": "PRIVADO",
+        "public": false,
+        "code": 403
+      },
+      {
+        "url": "https://linkedin-dev.s3.amazonaws.com",
+        "provider": "AWS S3",
+        "bucket": "linkedin-dev",
+        "status": "NAO EXISTE",
+        "public": false,
+        "code": 404
+      },
+      {
+        "url": "https://linkedin-private.s3.amazonaws.com",
+        "provider": "AWS S3",
+        "bucket": "linkedin-private",
+        "status": "NAO EXISTE",
+        "public": false,
+        "code": 404
+      },
+      {
+        "url": "https://linkedin-prod.s3.amazonaws.com",
+        "provider": "AWS S3",
+        "bucket": "linkedin-prod",
+        "status": "NAO EXISTE",
+        "public": false,
+        "code": 404
+      },
+      {
+        "url": "https://linkedin-public.s3.amazonaws.com",
+        "provider": "AWS S3",
+        "bucket": "linkedin-public",
+        "status": "NAO EXISTE",
+        "public": false,
+        "code": 404
+      },
+      {
+        "url": "https://linkedin-staging.s3.amazonaws.com",
+        "provider": "AWS S3",
+        "bucket": "linkedin-staging",
+        "status": "NAO EXISTE",
+        "public": false,
+        "code": 404
+      },
+      {
+        "url": "https://linkedin.blob.core.windows.net",
+        "provider": "Azure Blob",
+        "bucket": "linkedin",
+        "status": "HTTP 400",
+        "public": false,
+        "code": 400
+      },
+      {
+        "url": "https://linkedinstorage.blob.core.windows.net",
+        "provider": "Azure Blob",
+        "bucket": "linkedinstorage",
+        "status": "TIMEOUT",
+        "public": false,
+        "code": null
+      },
+      {
+        "url": "https://storage.googleapis.com/linkedin-assets",
+        "provider": "Google GCS",
+        "bucket": "linkedin-assets",
+        "status": "NAO EXISTE",
+        "public": false,
+        "code": 404
+      },
+      {
+        "url": "https://storage.googleapis.com/linkedin-public",
+        "provider": "Google GCS",
+        "bucket": "linkedin-public",
+        "status": "NAO EXISTE",
+        "public": false,
+        "code": 404
+      }
+    ],
+    "surface": {
+      "db_panels": [
+        {
+          "path": "/adminer.php",
+          "panel": "Adminer",
+          "code": 200,
+          "found": true
+        },
+        {
+          "path": "/adminer/",
+          "panel": "Adminer",
+          "code": 200,
+          "found": true
+        },
+        {
+          "path": "/phpmyadmin/",
+          "panel": "phpMyAdmin",
+          "code": 200,
+          "found": true
+        },
+        {
+          "path": "/pma/",
+          "panel": "phpMyAdmin",
+          "code": 200,
+          "found": true
+        },
+        {
+          "path": "/myadmin/",
+          "panel": "phpMyAdmin",
+          "code": 200,
+          "found": true
+        },
+        {
+          "path": "/phppgadmin/",
+          "panel": "phpPgAdmin",
+          "code": 200,
+          "found": true
+        },
+        {
+          "path": "/pgadmin/",
+          "panel": "pgAdmin",
+          "code": 200,
+          "found": true
+        },
+        {
+          "path": "/dbadmin/",
+          "panel": "DB Admin",
+          "code": 200,
+          "found": true
+        },
+        {
+          "path": "/mysql/",
+          "panel": "MySQL Panel",
+          "code": 200,
+          "found": true
+        },
+        {
+          "path": "/mongo-express/",
+          "panel": "Mongo Express",
+          "code": 200,
+          "found": true
+        },
+        {
+          "path": "/rockmongo/",
+          "panel": "RockMongo",
+          "code": 200,
+          "found": true
+        },
+        {
+          "path": "/redis-commander/",
+          "panel": "Redis Commander",
+          "code": 200,
+          "found": true
+        },
+        {
+          "path": "/elasticsearch/",
+          "panel": "Elasticsearch",
+          "code": 200,
+          "found": true
+        },
+        {
+          "path": "/_cat/indices",
+          "panel": "Elasticsearch API",
+          "code": 200,
+          "found": true
+        },
+        {
+          "path": "/_cluster/health",
+          "panel": "Elasticsearch API",
+          "code": 200,
+          "found": true
+        },
+        {
+          "path": "/solr/",
+          "panel": "Apache Solr",
+          "code": 200,
+          "found": true
+        },
+        {
+          "path": "/couchdb/",
+          "panel": "CouchDB",
+          "code": 200,
+          "found": true
+        },
+        {
+          "path": "/_utils/",
+          "panel": "CouchDB Fauxton",
+          "code": 200,
+          "found": true
+        },
+        {
+          "path": "/_all_dbs",
+          "panel": "CouchDB API",
+          "code": 200,
+          "found": true
+        },
+        {
+          "path": "/neo4j/",
+          "panel": "Neo4j",
+          "code": 200,
+          "found": true
+        }
+      ],
+      "url_params": [
+        {
+          "url": "https://www.linkedin.com/legal/copyright-policy",
+          "params": [
+            "trk"
+          ],
+          "full_url": "https://www.linkedin.com/legal/copyright-policy?trk=d_checkpoint_lg_consumer_login_ft_copyright_policy"
+        },
+        {
+          "url": "https://www.linkedin.com/legal/cookie-policy",
+          "params": [
+            "trk"
+          ],
+          "full_url": "https://www.linkedin.com/legal/cookie-policy?trk=d_checkpoint_lg_consumer_login_ft_cookie_policy"
+        },
+        {
+          "url": "https://www.linkedin.com/checkpoint/rp/request-password-reset",
+          "params": [
+            "session_redirect"
+          ],
+          "full_url": "https://www.linkedin.com/checkpoint/rp/request-password-reset?session_redirect=https%3A%2F%2Fwww%2Elinkedin%2Ecom%2Ffeed%2F"
+        },
+        {
+          "url": "https://www.linkedin.com/help/linkedin/answer/34593",
+          "params": [
+            "lang",
+            "trk"
+          ],
+          "full_url": "https://www.linkedin.com/help/linkedin/answer/34593?lang=en&trk=d_checkpoint_lg_consumer_login_ft_community_guidelines"
+        },
+        {
+          "url": "https://www.linkedin.com/legal/privacy-policy",
+          "params": [
+            "trk"
+          ],
+          "full_url": "https://www.linkedin.com/legal/privacy-policy?trk=d_checkpoint_lg_consumer_login_ft_privacy_policy"
+        },
+        {
+          "url": "https://www.linkedin.com/legal/user-agreement",
+          "params": [
+            "trk"
+          ],
+          "full_url": "https://www.linkedin.com/legal/user-agreement?trk=d_checkpoint_lg_consumer_login_ft_user_agreement"
+        },
+        {
+          "url": "https://www.linkedin.com/signup/cold-join",
+          "params": [
+            "session_redirect"
+          ],
+          "full_url": "https://www.linkedin.com/signup/cold-join?session_redirect=https%3A%2F%2Fwww.linkedin.com%2Ffeed%2F"
+        },
+        {
+          "url": "https://www.linkedin.com/help/linkedin",
+          "params": [
+            "trk",
+            "lang"
+          ],
+          "full_url": "https://www.linkedin.com/help/linkedin?trk=d_checkpoint_lg_consumer_login_ft_send_feedback&lang=en"
+        }
+      ],
+      "error_disclosures": [],
+      "total": 28
+    },
+    "error_db": []
+  }
+}

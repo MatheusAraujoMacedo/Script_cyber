@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """
-VulnRecon — Interactive CLI Security Auditing Tool
-A polished, menu-driven vulnerability scanner with styled terminal UI.
-Modules: Port Scanner | HTTP Headers | Dir Fuzzer | Admin Hunter | CVE Scanner | Cloud Buckets
+VulnRecon v4.0 — Enterprise CLI Security Auditing Tool
+Async-powered (aiohttp + asyncio) vulnerability scanner with styled terminal UI.
+Modules: Port Scanner | HTTP Headers | Dir Fuzzer | Admin Hunter | CVE Scanner
+         Cloud Buckets | WAF Detector | DB Error Scanner | Surface Mapper
+         File Malware Scanner | Subdomain Enum | Tech Fingerprinting
+Enterprise: Proxy Rotation | Auth Sessions | CI/CD | HTML Reports | OAST Stub
 """
 
 # ─────────────────────────────────────────────────────
-#  VirusTotal API Key (insert yours below)
+#  API Keys
 # ─────────────────────────────────────────────────────
-VIRUSTOTAL_API_KEY = "d3907ef31017f69d9473428ea32aeb232dfa820ca70479c3377e8d02d77eab73"  
+VIRUSTOTAL_API_KEY = ""
 
 import os
 import platform
@@ -21,16 +24,25 @@ import json
 import random
 import string
 import hashlib
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib.parse import urlparse
+import asyncio
+import ssl
+import html as html_mod
+from urllib.parse import urlparse, urlencode
 import argparse
 
 try:
-    import requests
-    from requests.exceptions import ConnectionError, Timeout, RequestException
+    import aiohttp
+    from aiohttp import ClientConnectorError, ServerDisconnectedError, ClientResponseError
 except ImportError:
-    print("\n  [!] Dependencia ausente: 'requests'")
-    print("      Instale com: pip install requests\n")
+    print("\n  [!] Dependencia ausente: 'aiohttp'")
+    print("      Instale com: pip install aiohttp\n")
+    sys.exit(1)
+
+try:
+    from bs4 import BeautifulSoup
+except ImportError:
+    print("\n  [!] Dependencia ausente: 'beautifulsoup4'")
+    print("      Instale com: pip install beautifulsoup4\n")
     sys.exit(1)
 
 
@@ -53,17 +65,15 @@ def setup_console():
             sys.stdout.reconfigure(encoding="utf-8")
         except Exception:
             pass
-    import urllib3
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    import warnings
+    warnings.filterwarnings("ignore")
 
 
 def clear_screen():
-    """Clear the terminal screen."""
     os.system("cls" if platform.system() == "Windows" else "clear")
 
 
 def get_panel_width():
-    """Calculate optimal panel width based on terminal size."""
     try:
         cols = os.get_terminal_size().columns
     except (ValueError, OSError):
@@ -76,7 +86,6 @@ def get_panel_width():
 # ─────────────────────────────────────────────────────
 
 class C:
-    """Compact ANSI escape codes."""
     R    = "\033[91m"
     G    = "\033[92m"
     Y    = "\033[93m"
@@ -89,10 +98,10 @@ class C:
 
 
 # ─────────────────────────────────────────────────────
-#  Stealth & Request Utilities
+#  Configuration Registry (Dynamic Signatures)
 # ─────────────────────────────────────────────────────
 
-_USER_AGENTS = [
+USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
@@ -102,28 +111,164 @@ _USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36 Edg/119.0.0.0",
 ]
 
-# Global throttle delay (seconds) between requests per thread
+COMMON_PORTS = {
+    21: "FTP", 22: "SSH", 23: "Telnet", 25: "SMTP", 53: "DNS",
+    80: "HTTP", 110: "POP3", 143: "IMAP", 443: "HTTPS", 445: "SMB",
+    993: "IMAPS", 995: "POP3S", 3306: "MySQL", 3389: "RDP",
+    5432: "PostgreSQL", 5900: "VNC", 6379: "Redis",
+    8080: "HTTP-Alt", 8443: "HTTPS-Alt", 27017: "MongoDB",
+}
+
+SECURITY_HEADERS = {
+    "Strict-Transport-Security": ("ALTA",  "Protege contra SSL-stripping."),
+    "X-Frame-Options":          ("MEDIA", "Previne clickjacking (iframe)."),
+    "X-Content-Type-Options":   ("MEDIA", "Previne MIME-type sniffing."),
+    "Content-Security-Policy":  ("ALTA",  "Controla recursos, mitiga XSS."),
+    "X-XSS-Protection":         ("BAIXA", "Filtro XSS legado (fallback)."),
+    "Referrer-Policy":           ("BAIXA", "Controla info de referrer."),
+    "Permissions-Policy":        ("MEDIA", "Restringe camera, mic, geoloc."),
+}
+SEV_C = {"ALTA": C.R, "MEDIA": C.Y, "BAIXA": C.DIM}
+
+FUZZ_PATHS = [
+    "/.git/", "/.git/config", "/.gitignore", "/.svn/", "/.hg/",
+    "/.env", "/.env.bak", "/config.php", "/config.yml",
+    "/wp-config.php", "/web.config",
+    "/admin", "/admin/", "/administrator/", "/wp-admin/",
+    "/wp-login.php", "/phpmyadmin/", "/cpanel", "/webmail",
+    "/backup.zip", "/backup.tar.gz", "/database.sql",
+    "/db.sql", "/dump.sql", "/.htaccess", "/.htpasswd",
+    "/server-status", "/server-info", "/phpinfo.php", "/info.php",
+    "/robots.txt", "/sitemap.xml", "/crossdomain.xml",
+    "/humans.txt", "/security.txt", "/.well-known/security.txt",
+    "/api/", "/api/v1/", "/swagger.json", "/openapi.json", "/graphql",
+]
+INTERESTING_CODES = {200, 201, 301, 302, 307, 308, 401, 403, 500}
+STATUS_LBL = {
+    200: ("ENCONTRADO", C.R), 201: ("ENCONTRADO", C.R),
+    301: ("REDIRECT", C.Y), 302: ("REDIRECT", C.Y),
+    307: ("REDIRECT", C.Y), 308: ("REDIRECT", C.Y),
+    401: ("PROTEGIDO", C.M), 403: ("PROIBIDO", C.M),
+    500: ("ERRO SVR", C.Y),
+}
+
+ADMIN_PATHS = [
+    ("/wp-login.php", "WordPress"), ("/wp-admin/", "WordPress"),
+    ("/wp-admin/install.php", "WordPress"),
+    ("/administrator/", "Joomla"), ("/administrator/index.php", "Joomla"),
+    ("/user/login", "Drupal"), ("/admin/", "Drupal/Generic"),
+    ("/admin", "Magento/Generic"), ("/index.php/admin/", "Magento"),
+    ("/phpmyadmin/", "phpMyAdmin"), ("/pma/", "phpMyAdmin"),
+    ("/myadmin/", "phpMyAdmin"), ("/phpmyadmin/index.php", "phpMyAdmin"),
+    ("/manager/html", "Apache Tomcat"), ("/manager/status", "Apache Tomcat"),
+    ("/host-manager/html", "Apache Tomcat"),
+    ("/cpanel", "cPanel"), ("/webmail", "cPanel Webmail"),
+    ("/whm/", "WHM (cPanel)"), ("/plesk/", "Plesk"), ("/webmin/", "Webmin"),
+    ("/admin/login", "Generic"), ("/admin/login.php", "Generic PHP"),
+    ("/login", "Generic"), ("/login.php", "Generic PHP"),
+    ("/panel/", "Generic Panel"), ("/dashboard/", "Generic Dashboard"),
+    ("/controlpanel/", "Generic"), ("/adminpanel/", "Generic"),
+    ("/cms/", "Generic CMS"), ("/cms/admin/", "Generic CMS"),
+    ("/admin/login/?next=/admin/", "Django"),
+    ("/nova/login", "Laravel Nova"), ("/rails/info", "Ruby on Rails"),
+]
+
+CMS_FINGERPRINTS = [
+    ("wp-content", "WordPress"), ("wp-includes", "WordPress"),
+    ("Joomla", "Joomla"), ("/media/jui/", "Joomla"),
+    ("Drupal", "Drupal"), ("drupal.js", "Drupal"),
+    ("Magento", "Magento"), ("phpMyAdmin", "phpMyAdmin"),
+    ("Apache Tomcat", "Apache Tomcat"), ("cPanel", "cPanel"),
+    ("Plesk", "Plesk"), ("django", "Django"),
+    ("csrfmiddlewaretoken", "Django"), ("laravel", "Laravel"),
+    ("rails", "Ruby on Rails"),
+]
+
+WAF_SIGNATURES = {
+    "Cloudflare":  ["cloudflare", "cf-ray", "cf-cache-status", "__cfduid"],
+    "Akamai":      ["akamai", "x-akamai", "akamaighost"],
+    "Sucuri":      ["sucuri", "x-sucuri"],
+    "AWS WAF":     ["awselb", "x-amzn", "x-amz-cf"],
+    "Imperva":     ["imperva", "incapsula", "x-iinfo"],
+    "F5 BIG-IP":   ["bigip", "f5", "x-wa-info"],
+    "ModSecurity": ["mod_security", "modsecurity"],
+    "Barracuda":   ["barracuda", "barra_counter"],
+    "Fortinet":    ["fortigate", "fortiWeb"],
+    "Wordfence":   ["wordfence"],
+}
+
+SYNTAX_PROBES = ["'", '"', "%00", "\\", ";", ")", "{{"]
+
+DB_ERROR_SIGS = [
+    ("SQL syntax", "MySQL"), ("mysql_fetch", "MySQL"),
+    ("mysql_num_rows", "MySQL"), ("You have an error in your SQL", "MySQL"),
+    ("pg_query", "PostgreSQL"), ("pg_exec", "PostgreSQL"),
+    ("PSQLException", "PostgreSQL"), ("unterminated quoted string", "PostgreSQL"),
+    ("ORA-", "Oracle"), ("ODBC SQL Server", "MSSQL"),
+    ("SQLServer JDBC", "MSSQL"), ("java.sql.SQLException", "Java/JDBC"),
+    ("sqlite3.OperationalError", "SQLite"),
+    ("near \":\": syntax error", "SQLite"),
+    ("PDOException", "PHP PDO"), ("MongoError", "MongoDB"),
+]
+
+DB_PANEL_PATHS = [
+    ("/adminer.php", "Adminer"), ("/adminer/", "Adminer"),
+    ("/phpmyadmin/", "phpMyAdmin"), ("/pma/", "phpMyAdmin"),
+    ("/myadmin/", "phpMyAdmin"), ("/phppgadmin/", "phpPgAdmin"),
+    ("/pgadmin/", "pgAdmin"), ("/dbadmin/", "DB Admin"),
+    ("/mysql/", "MySQL Panel"), ("/mongo-express/", "Mongo Express"),
+    ("/rockmongo/", "RockMongo"), ("/redis-commander/", "Redis Commander"),
+    ("/elasticsearch/", "Elasticsearch"), ("/_cat/indices", "Elasticsearch API"),
+    ("/_cluster/health", "Elasticsearch API"), ("/solr/", "Apache Solr"),
+    ("/couchdb/", "CouchDB"), ("/_utils/", "CouchDB Fauxton"),
+    ("/_all_dbs", "CouchDB API"), ("/neo4j/", "Neo4j"),
+]
+
+ERROR_PATTERNS = [
+    ("SQL syntax", "ALTA", "Mensagem de erro SQL exposta"),
+    ("mysql_fetch", "ALTA", "Funcao MySQL exposta no output"),
+    ("pg_query", "ALTA", "Funcao PostgreSQL exposta"),
+    ("ORA-", "ALTA", "Erro Oracle Database exposto"),
+    ("ODBC SQL Server", "ALTA", "Erro MSSQL/ODBC exposto"),
+    ("Traceback (most recent call last)", "ALTA", "Stack trace Python exposto"),
+    ("at java.", "MEDIA", "Stack trace Java exposto"),
+    ("at org.", "MEDIA", "Stack trace Java/Spring exposto"),
+    ("Exception in thread", "MEDIA", "Excecao Java nao tratada"),
+    ("Warning: ", "MEDIA", "Warning PHP exposto"),
+    ("Fatal error", "ALTA", "Erro fatal PHP exposto"),
+    ("Notice: ", "BAIXA", "Notice PHP exposto"),
+    ("Parse error", "ALTA", "Erro de parse PHP exposto"),
+    ("Stack Trace:", "MEDIA", "Stack trace .NET exposto"),
+    ("Server Error in", "MEDIA", "Erro de servidor ASP.NET"),
+    ("X-Debug-Token", "MEDIA", "Symfony debug token exposto"),
+    ("DJANGO_SETTINGS_MODULE", "ALTA", "Config Django exposta"),
+    ("DEBUG = True", "ALTA", "Modo debug Django ativo"),
+    ("Laravel", "BAIXA", "Framework Laravel identificado"),
+    ("APP_DEBUG", "ALTA", "Debug mode Laravel exposto"),
+]
+
+TECH_PATTERNS = [
+    ("wp-content", "WordPress", "CMS"), ("wp-includes", "WordPress", "CMS"),
+    ("wp-json", "WordPress", "CMS"), ("/joomla", "Joomla", "CMS"),
+    ("Drupal", "Drupal", "CMS"), ("Magento", "Magento", "CMS"),
+    ("Shopify", "Shopify", "CMS/E-commerce"), ("Wix.com", "Wix", "CMS"),
+    ("squarespace", "Squarespace", "CMS"), ("react", "React", "Frontend"),
+    ("__next", "Next.js", "Frontend"), ("_nuxt", "Nuxt.js", "Frontend"),
+    ("ng-version", "Angular", "Frontend"), ("vue.js", "Vue.js", "Frontend"),
+    ("jquery", "jQuery", "Frontend"), ("bootstrap", "Bootstrap", "CSS"),
+    ("tailwindcss", "TailwindCSS", "CSS"), ("laravel", "Laravel", "Backend"),
+    ("csrfmiddlewaretoken", "Django", "Backend"),
+    ("__rails", "Ruby on Rails", "Backend"),
+    ("express", "Express.js", "Backend"),
+    ("phpmyadmin", "phpMyAdmin", "Database"),
+    ("google-analytics", "Google Analytics", "Analytics"),
+    ("gtag", "Google Tag Manager", "Analytics"),
+    ("cloudflare", "Cloudflare", "CDN/WAF"),
+    ("recaptcha", "reCAPTCHA", "Security"),
+]
+
+# Global throttle
 THROTTLE_DELAY = 0.15
-
-
-def _random_ua():
-    """Return a random legitimate browser User-Agent string."""
-    return random.choice(_USER_AGENTS)
-
-
-def _vr_get(url, timeout=5, **kwargs):
-    """
-    VulnRecon GET wrapper with random User-Agent and throttle.
-    Thread-safe; applies a small delay to avoid target overload.
-    """
-    time.sleep(random.uniform(THROTTLE_DELAY * 0.5, THROTTLE_DELAY * 1.5))
-    headers = kwargs.pop("headers", {})
-    headers.setdefault("User-Agent", _random_ua())
-    return requests.get(
-        url, timeout=timeout, verify=kwargs.pop("verify", False),
-        allow_redirects=kwargs.pop("allow_redirects", True),
-        headers=headers, **kwargs
-    )
 
 
 # ─────────────────────────────────────────────────────
@@ -131,24 +276,20 @@ def _vr_get(url, timeout=5, **kwargs):
 # ─────────────────────────────────────────────────────
 
 def _vlen(text):
-    """Visible length of text (strips ANSI codes)."""
     return len(re.sub(r'\033\[[0-9;]*m', '', text))
 
 
 def draw_box(lines, width=60, title="", bc=None):
-    """Draw a Unicode-bordered box around content lines."""
     if bc is None:
         bc = C.CY
     r = C.RST
     iw = width - 2
-
     if title:
         tl = _vlen(title)
         rpad = max(iw - tl - 4, 0)
         print(f"  {bc}┌── {r}{title} {bc}{'─' * rpad}┐{r}")
     else:
         print(f"  {bc}┌{'─' * iw}┐{r}")
-
     print(f"  {bc}│{r}{' ' * iw}{bc}│{r}")
     for line in lines:
         pad = max(iw - _vlen(line), 0)
@@ -158,39 +299,31 @@ def draw_box(lines, width=60, title="", bc=None):
 
 
 def draw_table(headers, rows, bc=None):
-    """Draw a styled table with box-drawing characters."""
     if bc is None:
         bc = C.CY
     r = C.RST
     cw = [h[1] for h in headers]
-
-    # Top
     print(f"  {bc}┌" + "┬".join("─" * (w + 2) for w in cw) + f"┐{r}")
-    # Header
     line = f"  {bc}│{r}"
     for (label, w) in headers:
         pad = max(w - _vlen(label), 0)
         line += f" {C.BLD}{C.W}{label}{r}{' ' * (pad + 1)}{bc}│{r}"
     print(line)
-    # Sep
     print(f"  {bc}├" + "┼".join("─" * (w + 2) for w in cw) + f"┤{r}")
-    # Rows
     for row in rows:
         line = f"  {bc}│{r}"
         for i, cell in enumerate(row):
-            pad = max(cw[i] - _vlen(cell), 0)
+            pad = max(cw[i] - _vlen(str(cell)), 0)
             line += f" {cell}{' ' * (pad + 1)}{bc}│{r}"
         print(line)
-    # Bottom
     print(f"  {bc}└" + "┴".join("─" * (w + 2) for w in cw) + f"┘{r}")
 
 
 # ─────────────────────────────────────────────────────
-#  Loading Spinner
+#  Loading Spinner (Thread-based, asyncio-compatible)
 # ─────────────────────────────────────────────────────
 
 class Spinner:
-    """Animated loading spinner for long-running operations."""
     FRAMES = ["|", "/", "-", "\\"]
 
     def __init__(self, msg="Processando..."):
@@ -234,11 +367,78 @@ BANNER = f"""
     ╚═══╝   ╚═════╝ ╚══════╝╚═╝  ╚═══╝{C.RST}
 {C.W}{C.BLD}           R  E  C  O  N{C.RST}
 {C.DIM}  ──────────────────────────────────────
-{C.W}   Security Auditing Tool  {C.DIM}v3.0
+{C.W}   Security Auditing Tool  {C.DIM}v4.0 Enterprise
   ──────────────────────────────────────{C.RST}
 """
 
-BANNER_MINI = f"\n{C.CY}{C.BLD}  ▸ VULNRECON{C.RST} {C.DIM}v3.0{C.RST}\n{C.DIM}  ──────────────────────────────────────{C.RST}\n"
+BANNER_MINI = f"\n{C.CY}{C.BLD}  ▸ VULNRECON{C.RST} {C.DIM}v4.0{C.RST}\n{C.DIM}  ──────────────────────────────────────{C.RST}\n"
+
+
+# ─────────────────────────────────────────────────────
+#  Async HTTP Engine
+# ─────────────────────────────────────────────────────
+
+class AsyncHttpClient:
+    """Central async HTTP client with stealth, proxy rotation, and auth support."""
+
+    def __init__(self, timeout=5, delay=0.15, proxy_list=None, cookie=None, token=None):
+        self.timeout = aiohttp.ClientTimeout(total=timeout)
+        self.delay = delay
+        self.proxies = []
+        if proxy_list and os.path.isfile(proxy_list):
+            with open(proxy_list, "r") as f:
+                self.proxies = [l.strip() for l in f if l.strip()]
+        self.cookie = cookie
+        self.token = token
+        self._ssl_ctx = ssl.create_default_context()
+        self._ssl_ctx.check_hostname = False
+        self._ssl_ctx.verify_mode = ssl.CERT_NONE
+
+    def _build_headers(self, extra=None):
+        headers = {"User-Agent": random.choice(USER_AGENTS)}
+        if self.cookie:
+            headers["Cookie"] = self.cookie
+        if self.token:
+            headers["Authorization"] = self.token
+        if extra:
+            headers.update(extra)
+        return headers
+
+    def _pick_proxy(self):
+        return random.choice(self.proxies) if self.proxies else None
+
+    async def get(self, session, url, allow_redirects=True, extra_headers=None, verify_ssl=False):
+        """Perform async GET with jitter delay, random UA, proxy, and auth."""
+        jitter = random.uniform(self.delay * 0.5, self.delay * 1.5) if self.delay > 0 else 0
+        if jitter > 0:
+            await asyncio.sleep(jitter)
+        headers = self._build_headers(extra_headers)
+        proxy = self._pick_proxy()
+        ssl_ctx = None if verify_ssl else self._ssl_ctx
+        try:
+            async with session.get(
+                url, headers=headers, allow_redirects=allow_redirects,
+                proxy=proxy, ssl=ssl_ctx, timeout=self.timeout
+            ) as resp:
+                body = await resp.text(errors="replace")
+                return AsyncResponse(resp.status, dict(resp.headers), body)
+        except (ClientConnectorError, ServerDisconnectedError, asyncio.TimeoutError,
+                ClientResponseError, aiohttp.ClientError, OSError) as e:
+            raise NetworkError(str(e)) from e
+
+
+class AsyncResponse:
+    """Lightweight container for async HTTP response data."""
+    def __init__(self, status, headers, text):
+        self.status_code = status
+        self.headers = headers
+        self.text = text
+        self.content_length = len(text.encode("utf-8", errors="replace"))
+
+
+class NetworkError(Exception):
+    """Custom exception for network failures."""
+    pass
 
 
 # ─────────────────────────────────────────────────────
@@ -246,7 +446,6 @@ BANNER_MINI = f"\n{C.CY}{C.BLD}  ▸ VULNRECON{C.RST} {C.DIM}v3.0{C.RST}\n{C.DIM
 # ─────────────────────────────────────────────────────
 
 def resolve_target(raw):
-    """Parse and validate target. Returns dict or None."""
     raw = raw.strip()
     if not raw:
         return None
@@ -265,7 +464,6 @@ def resolve_target(raw):
 
 
 def prompt_target():
-    """Interactively prompt for a target with validation. Returns dict or None."""
     w = get_panel_width()
     while True:
         print()
@@ -281,12 +479,10 @@ def prompt_target():
             return None
         if user_input in ("0", ""):
             return None
-
         spinner = Spinner("Resolvendo alvo...")
         spinner.start()
         target = resolve_target(user_input)
         spinner.stop()
-
         if target is None:
             print()
             draw_box([
@@ -294,7 +490,6 @@ def prompt_target():
                 f"  {C.DIM}Verifique o hostname/IP e sua conexao.{C.RST}",
             ], width=w, title=f"{C.R}{C.BLD}ERRO{C.RST}", bc=C.R)
             continue
-
         print()
         draw_box([
             f"  {C.G}Alvo resolvido com sucesso!{C.RST}",
@@ -305,49 +500,76 @@ def prompt_target():
 
 
 # ─────────────────────────────────────────────────────
-#  Module 1: Port Scanner
+#  OAST Stub (Out-of-Band Application Security Testing)
 # ─────────────────────────────────────────────────────
 
-COMMON_PORTS = {
-    21: "FTP", 22: "SSH", 23: "Telnet", 25: "SMTP", 53: "DNS",
-    80: "HTTP", 110: "POP3", 143: "IMAP", 443: "HTTPS", 445: "SMB",
-    993: "IMAPS", 995: "POP3S", 3306: "MySQL", 3389: "RDP",
-    5432: "PostgreSQL", 5900: "VNC", 6379: "Redis",
-    8080: "HTTP-Alt", 8443: "HTTPS-Alt", 27017: "MongoDB",
-}
+class InteractshClient:
+    """Placeholder for future Interactsh/OAST integration.
+    Generates unique callback URLs for detecting blind vulnerabilities
+    such as SSRF, Blind XSS, and Log4Shell.
+    """
+
+    def __init__(self, server="oast.live"):
+        self.server = server
+        self.correlation_id = "".join(random.choices(string.ascii_lowercase + string.digits, k=16))
+        self._interactions = []
+
+    def generate_url(self, label="test"):
+        """Generate a unique OAST callback URL."""
+        return f"https://{label}-{self.correlation_id}.{self.server}"
+
+    def poll_interactions(self):
+        """Poll for received interactions (stub — returns empty list)."""
+        # Future: implement actual Interactsh API polling
+        return self._interactions
+
+    def get_status(self):
+        return {
+            "server": self.server,
+            "correlation_id": self.correlation_id,
+            "interactions": len(self._interactions),
+            "status": "stub — nao implementado",
+        }
 
 
-def _scan_port(ip, port, timeout):
+# ─────────────────────────────────────────────────────
+#  Module 1: Async Port Scanner
+# ─────────────────────────────────────────────────────
+
+async def _scan_single_port(ip, port, timeout):
     svc = COMMON_PORTS.get(port, "?")
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(timeout)
-            return {"port": port, "service": svc, "is_open": s.connect_ex((ip, port)) == 0}
-    except (socket.timeout, OSError):
+        _, writer = await asyncio.wait_for(
+            asyncio.open_connection(ip, port), timeout=timeout
+        )
+        writer.close()
+        await writer.wait_closed()
+        return {"port": port, "service": svc, "is_open": True}
+    except (asyncio.TimeoutError, OSError, ConnectionRefusedError):
         return {"port": port, "service": svc, "is_open": False}
 
 
-def run_port_scanner(target, timeout=1.5, threads=20):
+async def run_port_scanner(target, http_client=None, timeout=1.5, concurrency=30):
     w = get_panel_width()
     print(BANNER_MINI)
     draw_box([
         f"  {C.W}Alvo:    {C.BLD}{target['hostname']}{C.RST} ({target['ip']})",
-        f"  {C.W}Portas:  {C.BLD}{len(COMMON_PORTS)}{C.RST} | Timeout: {C.BLD}{timeout}s{C.RST} | Threads: {C.BLD}{threads}{C.RST}",
+        f"  {C.W}Portas:  {C.BLD}{len(COMMON_PORTS)}{C.RST} | Timeout: {C.BLD}{timeout}s{C.RST} | Async",
     ], width=w, title=f"{C.CY}{C.BLD}SCANNER DE PORTAS{C.RST}")
 
     print()
     sp = Spinner("Escaneando portas...")
     sp.start()
     t0 = time.time()
-    results = []
-    with ThreadPoolExecutor(max_workers=threads) as ex:
-        futs = {ex.submit(_scan_port, target["ip"], p, timeout): p for p in COMMON_PORTS}
-        for f in as_completed(futs):
-            try:
-                results.append(f.result())
-            except Exception:
-                p = futs[f]
-                results.append({"port": p, "service": COMMON_PORTS.get(p, "?"), "is_open": False})
+    sem = asyncio.Semaphore(concurrency)
+
+    async def _guarded(ip, port):
+        async with sem:
+            return await _scan_single_port(ip, port, timeout)
+
+    tasks = [_guarded(target["ip"], p) for p in COMMON_PORTS]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    results = [r if isinstance(r, dict) else {"port": 0, "service": "?", "is_open": False} for r in results]
     elapsed = time.time() - t0
     sp.stop(f"Scan concluido em {elapsed:.2f}s")
 
@@ -379,22 +601,10 @@ def run_port_scanner(target, timeout=1.5, threads=20):
 
 
 # ─────────────────────────────────────────────────────
-#  Module 2: HTTP Security Headers
+#  Module 2: HTTP Security Headers (Async)
 # ─────────────────────────────────────────────────────
 
-SECURITY_HEADERS = {
-    "Strict-Transport-Security": ("ALTA",  "Protege contra SSL-stripping."),
-    "X-Frame-Options":          ("MEDIA", "Previne clickjacking (iframe)."),
-    "X-Content-Type-Options":   ("MEDIA", "Previne MIME-type sniffing."),
-    "Content-Security-Policy":  ("ALTA",  "Controla recursos, mitiga XSS."),
-    "X-XSS-Protection":         ("BAIXA", "Filtro XSS legado (fallback)."),
-    "Referrer-Policy":           ("BAIXA", "Controla info de referrer."),
-    "Permissions-Policy":        ("MEDIA", "Restringe camera, mic, geoloc."),
-}
-SEV_C = {"ALTA": C.R, "MEDIA": C.Y, "BAIXA": C.DIM}
-
-
-def run_header_analysis(target, timeout=10):
+async def run_header_analysis(target, http_client=None, timeout=10):
     w = get_panel_width()
     print(BANNER_MINI)
     draw_box([
@@ -406,13 +616,18 @@ def run_header_analysis(target, timeout=10):
     sp = Spinner("Requisitando cabecalhos...")
     sp.start()
     try:
-        resp = requests.get(target["url"], timeout=timeout, allow_redirects=True, verify=False)
-    except (Timeout, ConnectionError, RequestException) as e:
+        resp = await http_client.get(
+            aiohttp.ClientSession(), target["url"]
+        ) if http_client else None
+        if resp is None:
+            async with aiohttp.ClientSession() as session:
+                client = AsyncHttpClient(timeout=timeout)
+                resp = await client.get(session, target["url"])
+    except NetworkError as e:
         sp.stop()
         print()
         draw_box([f"  {C.R}Falha na conexao: {e}{C.RST}"], width=w, title=f"{C.R}{C.BLD}ERRO{C.RST}", bc=C.R)
         return {"present": [], "missing": list(SECURITY_HEADERS.keys()), "error": True}
-
     sp.stop(f"HTTP {resp.status_code} — {len(resp.headers)} headers recebidos")
 
     present, missing, lines = [], [], []
@@ -431,7 +646,6 @@ def run_header_analysis(target, timeout=10):
 
     print()
     draw_box(lines, width=w, title=f"{C.CY}{C.BLD}ANALISE{C.RST}")
-
     score = len(present) / len(SECURITY_HEADERS) * 100
     sc = C.G if score >= 70 else (C.Y if score >= 40 else C.R)
     print()
@@ -443,93 +657,68 @@ def run_header_analysis(target, timeout=10):
 
 
 # ─────────────────────────────────────────────────────
-#  Module 3: Directory Fuzzer
+#  Module 3: Async Directory Fuzzer
 # ─────────────────────────────────────────────────────
 
-FUZZ_PATHS = [
-    "/.git/", "/.git/config", "/.gitignore", "/.svn/", "/.hg/",
-    "/.env", "/.env.bak", "/config.php", "/config.yml",
-    "/wp-config.php", "/web.config",
-    "/admin", "/admin/", "/administrator/", "/wp-admin/",
-    "/wp-login.php", "/phpmyadmin/", "/cpanel", "/webmail",
-    "/backup.zip", "/backup.tar.gz", "/database.sql",
-    "/db.sql", "/dump.sql", "/.htaccess", "/.htpasswd",
-    "/server-status", "/server-info", "/phpinfo.php", "/info.php",
-    "/robots.txt", "/sitemap.xml", "/crossdomain.xml",
-    "/humans.txt", "/security.txt", "/.well-known/security.txt",
-    "/api/", "/api/v1/", "/swagger.json", "/openapi.json", "/graphql",
-]
-INTERESTING = {200, 201, 301, 302, 307, 308, 401, 403, 500}
-STATUS_LBL = {
-    200: ("ENCONTRADO", C.R), 201: ("ENCONTRADO", C.R),
-    301: ("REDIRECT", C.Y), 302: ("REDIRECT", C.Y),
-    307: ("REDIRECT", C.Y), 308: ("REDIRECT", C.Y),
-    401: ("PROTEGIDO", C.M), 403: ("PROIBIDO", C.M),
-    500: ("ERRO SVR", C.Y),
-}
-
-
-def _fuzz_path(base, path, timeout):
+async def _fuzz_single_path(session, client, base, path):
     try:
-        r = _vr_get(base.rstrip("/") + path, timeout=timeout, allow_redirects=False)
-        clen = len(r.content)
-        return {"path": path, "code": r.status_code, "hit": r.status_code in INTERESTING, "clen": clen}
-    except (Timeout, ConnectionError, RequestException):
+        resp = await client.get(session, base.rstrip("/") + path, allow_redirects=False)
+        return {"path": path, "code": resp.status_code, "hit": resp.status_code in INTERESTING_CODES, "clen": resp.content_length}
+    except NetworkError:
         return {"path": path, "code": None, "hit": False, "clen": 0}
 
 
-def run_directory_fuzzer(target, timeout=5, threads=10, wordlist_path=None):
+async def run_directory_fuzzer(target, http_client=None, timeout=5, concurrency=15, wordlist_path=None):
     w = get_panel_width()
     print(BANNER_MINI)
+    client = http_client or AsyncHttpClient(timeout=timeout)
 
-    # Load wordlist: external file or built-in
     if wordlist_path and os.path.isfile(wordlist_path):
         with open(wordlist_path, "r", encoding="utf-8", errors="ignore") as f:
-            paths = [line.strip() for line in f if line.strip()]
+            paths = [l.strip() for l in f if l.strip()]
             paths = [p if p.startswith("/") else "/" + p for p in paths]
         draw_box([
             f"  {C.W}Alvo:     {C.BLD}{target['url']}{C.RST}",
             f"  {C.W}Wordlist: {C.BLD}{wordlist_path}{C.RST} ({len(paths)} rotas)",
-            f"  {C.W}Threads:  {C.BLD}{threads}{C.RST}",
         ], width=w, title=f"{C.CY}{C.BLD}CACA-DIRETORIOS{C.RST}")
     else:
         paths = FUZZ_PATHS
         draw_box([
             f"  {C.W}Alvo:     {C.BLD}{target['url']}{C.RST}",
-            f"  {C.W}Wordlist: {C.BLD}{len(paths)}{C.RST} rotas (embutida) | Threads: {C.BLD}{threads}{C.RST}",
+            f"  {C.W}Wordlist: {C.BLD}{len(paths)}{C.RST} rotas (embutida) | Async",
         ], width=w, title=f"{C.CY}{C.BLD}CACA-DIRETORIOS{C.RST}")
 
-    # Baseline calibration: detect soft-404 / catch-all pages
+    # Soft-404 calibration
     print()
     rand_slug = "/" + "".join(random.choices(string.ascii_lowercase, k=16))
     baseline_clen = None
-    try:
-        bl_resp = _vr_get(target["url"].rstrip("/") + rand_slug, timeout=timeout, allow_redirects=False)
-        if bl_resp.status_code == 200:
-            baseline_clen = len(bl_resp.content)
-            draw_box([
-                f"  {C.Y}Soft-404 detectado (catch-all page){C.RST}",
-                f"  {C.DIM}Baseline: {baseline_clen} bytes — filtrando falsos positivos{C.RST}",
-            ], width=w, title=f"{C.Y}{C.BLD}CALIBRACAO{C.RST}", bc=C.Y)
-            print()
-    except (Timeout, ConnectionError, RequestException):
-        pass
+    async with aiohttp.ClientSession() as session:
+        try:
+            bl_resp = await client.get(session, target["url"].rstrip("/") + rand_slug, allow_redirects=False)
+            if bl_resp.status_code == 200:
+                baseline_clen = bl_resp.content_length
+                draw_box([
+                    f"  {C.Y}Soft-404 detectado (catch-all page){C.RST}",
+                    f"  {C.DIM}Baseline: {baseline_clen} bytes — filtrando falsos positivos{C.RST}",
+                ], width=w, title=f"{C.Y}{C.BLD}CALIBRACAO{C.RST}", bc=C.Y)
+                print()
+        except NetworkError:
+            pass
 
-    sp = Spinner("Fuzzing em andamento...")
-    sp.start()
-    t0 = time.time()
-    results = []
-    with ThreadPoolExecutor(max_workers=threads) as ex:
-        futs = {ex.submit(_fuzz_path, target["url"], p, timeout): p for p in paths}
-        for f in as_completed(futs):
-            try:
-                results.append(f.result())
-            except Exception:
-                results.append({"path": futs[f], "code": None, "hit": False, "clen": 0})
-    elapsed = time.time() - t0
-    sp.stop(f"Fuzzing concluido em {elapsed:.2f}s")
+        sp = Spinner("Fuzzing em andamento...")
+        sp.start()
+        t0 = time.time()
+        sem = asyncio.Semaphore(concurrency)
 
-    # Filter out soft-404 false positives
+        async def _guarded(path):
+            async with sem:
+                return await _fuzz_single_path(session, client, target["url"], path)
+
+        results = await asyncio.gather(*[_guarded(p) for p in paths], return_exceptions=True)
+        results = [r if isinstance(r, dict) else {"path": "?", "code": None, "hit": False, "clen": 0} for r in results]
+        elapsed = time.time() - t0
+        sp.stop(f"Fuzzing concluido em {elapsed:.2f}s")
+
     if baseline_clen is not None:
         fp_count = 0
         for r in results:
@@ -538,9 +727,8 @@ def run_directory_fuzzer(target, timeout=5, threads=10, wordlist_path=None):
                 r["code_note"] = "SOFT-404"
                 fp_count += 1
         if fp_count:
-            draw_box([
-                f"  {C.G}{fp_count} falso(s) positivo(s) filtrado(s) pelo baseline.{C.RST}",
-            ], width=w, title=f"{C.G}{C.BLD}FILTRO{C.RST}", bc=C.G)
+            draw_box([f"  {C.G}{fp_count} falso(s) positivo(s) filtrado(s).{C.RST}"],
+                     width=w, title=f"{C.G}{C.BLD}FILTRO{C.RST}", bc=C.G)
             print()
 
     results.sort(key=lambda r: (not r["hit"], r["path"]))
@@ -560,151 +748,65 @@ def run_directory_fuzzer(target, timeout=5, threads=10, wordlist_path=None):
 
     print()
     draw_table(hdr, rows)
-    safe_n = len(results) - hit_n
     print()
     if hit_n:
         draw_box([
-            f"  {C.R}{C.BLD}{hit_n} exposta(s){C.RST} {C.DIM}|{C.RST} {C.G}{safe_n} segura(s){C.RST}",
+            f"  {C.R}{C.BLD}{hit_n} exposta(s){C.RST} {C.DIM}|{C.RST} {C.G}{len(results) - hit_n} segura(s){C.RST}",
             f"  {C.Y}Rotas expostas podem vazar informacoes sensiveis!{C.RST}",
         ], width=w, title=f"{C.Y}{C.BLD}RESULTADO{C.RST}", bc=C.Y)
     else:
-        draw_box([
-            f"  {C.G}{C.BLD}Nenhuma rota sensivel exposta.{C.RST}",
-        ], width=w, title=f"{C.G}{C.BLD}RESULTADO{C.RST}", bc=C.G)
+        draw_box([f"  {C.G}{C.BLD}Nenhuma rota sensivel exposta.{C.RST}"],
+                 width=w, title=f"{C.G}{C.BLD}RESULTADO{C.RST}", bc=C.G)
     return results
 
 
 # ─────────────────────────────────────────────────────
-#  Module 4: Advanced Admin Panel Hunter
+#  Module 4: Async Admin Panel Hunter
 # ─────────────────────────────────────────────────────
 
-ADMIN_PATHS = [
-    # WordPress
-    ("/wp-login.php", "WordPress"),
-    ("/wp-admin/", "WordPress"),
-    ("/wp-admin/install.php", "WordPress"),
-    # Joomla
-    ("/administrator/", "Joomla"),
-    ("/administrator/index.php", "Joomla"),
-    # Drupal
-    ("/user/login", "Drupal"),
-    ("/admin/", "Drupal/Generic"),
-    # Magento
-    ("/admin", "Magento/Generic"),
-    ("/index.php/admin/", "Magento"),
-    # phpMyAdmin
-    ("/phpmyadmin/", "phpMyAdmin"),
-    ("/pma/", "phpMyAdmin"),
-    ("/myadmin/", "phpMyAdmin"),
-    ("/phpmyadmin/index.php", "phpMyAdmin"),
-    # Tomcat
-    ("/manager/html", "Apache Tomcat"),
-    ("/manager/status", "Apache Tomcat"),
-    ("/host-manager/html", "Apache Tomcat"),
-    # cPanel / Plesk / Webmin
-    ("/cpanel", "cPanel"),
-    ("/webmail", "cPanel Webmail"),
-    ("/whm/", "WHM (cPanel)"),
-    ("/plesk/", "Plesk"),
-    ("/webmin/", "Webmin"),
-    # Generic
-    ("/admin/login", "Generic"),
-    ("/admin/login.php", "Generic PHP"),
-    ("/login", "Generic"),
-    ("/login.php", "Generic PHP"),
-    ("/panel/", "Generic Panel"),
-    ("/dashboard/", "Generic Dashboard"),
-    ("/controlpanel/", "Generic"),
-    ("/adminpanel/", "Generic"),
-    ("/cms/", "Generic CMS"),
-    ("/cms/admin/", "Generic CMS"),
-    # Django / Laravel / Rails
-    ("/admin/login/?next=/admin/", "Django"),
-    ("/nova/login", "Laravel Nova"),
-    ("/rails/info", "Ruby on Rails"),
-]
-
-# Fingerprint patterns: (substring_in_html, technology_name)
-CMS_FINGERPRINTS = [
-    ("wp-content", "WordPress"),
-    ("wp-includes", "WordPress"),
-    ("Joomla", "Joomla"),
-    ("/media/jui/", "Joomla"),
-    ("Drupal", "Drupal"),
-    ("drupal.js", "Drupal"),
-    ("Magento", "Magento"),
-    ("phpMyAdmin", "phpMyAdmin"),
-    ("Apache Tomcat", "Apache Tomcat"),
-    ("cPanel", "cPanel"),
-    ("Plesk", "Plesk"),
-    ("django", "Django"),
-    ("csrfmiddlewaretoken", "Django"),
-    ("laravel", "Laravel"),
-    ("rails", "Ruby on Rails"),
-]
-
-
-def _probe_admin_path(base_url, path, expected_cms, timeout):
-    """Send GET to an admin path; return result with optional CMS fingerprint."""
+async def _probe_admin(session, client, base_url, path, expected_cms):
     full_url = base_url.rstrip("/") + path
     try:
-        resp = requests.get(
-            full_url, timeout=timeout, allow_redirects=True, verify=False,
-            headers={"User-Agent": "VulnRecon/3.0 (Security Audit)"}
-        )
+        resp = await client.get(session, full_url)
         code = resp.status_code
         detected_cms = None
-
-        # Only fingerprint on 200/401/403 responses (page exists)
         if code in (200, 401, 403):
-            body = resp.text[:5000].lower()  # Read first 5KB only
+            body = resp.text[:5000].lower()
             for pattern, cms_name in CMS_FINGERPRINTS:
                 if pattern.lower() in body:
                     detected_cms = cms_name
                     break
             if detected_cms is None:
                 detected_cms = expected_cms
-
-        return {
-            "path": path,
-            "code": code,
-            "cms": detected_cms,
-            "found": code in (200, 301, 302, 401, 403),
-        }
-    except (Timeout, ConnectionError, RequestException):
+        return {"path": path, "code": code, "cms": detected_cms, "found": code in (200, 301, 302, 401, 403)}
+    except NetworkError:
         return {"path": path, "code": None, "cms": None, "found": False}
 
 
-def run_admin_hunter(target, timeout=5, threads=10):
-    """Run the Advanced Admin Panel Hunter module."""
+async def run_admin_hunter(target, http_client=None, timeout=5, concurrency=15):
     w = get_panel_width()
     print(BANNER_MINI)
+    client = http_client or AsyncHttpClient(timeout=timeout)
     draw_box([
         f"  {C.W}Alvo:     {C.BLD}{target['url']}{C.RST}",
-        f"  {C.W}Wordlist: {C.BLD}{len(ADMIN_PATHS)}{C.RST} rotas de admin | Threads: {C.BLD}{threads}{C.RST}",
+        f"  {C.W}Wordlist: {C.BLD}{len(ADMIN_PATHS)}{C.RST} rotas de admin | Async",
     ], width=w, title=f"{C.CY}{C.BLD}CACA-PAINEIS DE ADMIN{C.RST}")
 
     print()
     sp = Spinner("Buscando paineis de administracao...")
     sp.start()
     t0 = time.time()
-    results = []
-    with ThreadPoolExecutor(max_workers=threads) as ex:
-        futs = {
-            ex.submit(_probe_admin_path, target["url"], path, cms, timeout): path
-            for path, cms in ADMIN_PATHS
-        }
-        for f in as_completed(futs):
-            try:
-                results.append(f.result())
-            except Exception:
-                results.append({"path": futs[f], "code": None, "cms": None, "found": False})
+    sem = asyncio.Semaphore(concurrency)
+    async with aiohttp.ClientSession() as session:
+        async def _guarded(path, cms):
+            async with sem:
+                return await _probe_admin(session, client, target["url"], path, cms)
+        results = await asyncio.gather(*[_guarded(p, c) for p, c in ADMIN_PATHS], return_exceptions=True)
+    results = [r if isinstance(r, dict) else {"path": "?", "code": None, "cms": None, "found": False} for r in results]
     elapsed = time.time() - t0
     sp.stop(f"Busca concluida em {elapsed:.2f}s")
 
-    # Sort: found first
     results.sort(key=lambda r: (not r["found"], r["path"]))
-
     hdr = [("Rota", 28), ("HTTP", 6), ("CMS/Tech", 16), ("Status", 12)]
     rows = []
     found_n = 0
@@ -714,113 +816,80 @@ def run_admin_hunter(target, timeout=5, threads=10):
         if len(cms) > 16:
             cms = cms[:14] + ".."
         if r["code"] is None:
-            rows.append([f"{C.DIM}{p}{C.RST}", f"{C.DIM}---{C.RST}",
-                         f"{C.DIM}-{C.RST}", f"{C.DIM}TIMEOUT{C.RST}"])
+            rows.append([f"{C.DIM}{p}{C.RST}", f"{C.DIM}---{C.RST}", f"{C.DIM}-{C.RST}", f"{C.DIM}TIMEOUT{C.RST}"])
         elif r["found"]:
             found_n += 1
             clr = C.R if r["code"] == 200 else C.M
             lbl = "ABERTO" if r["code"] == 200 else ("PROTEGIDO" if r["code"] in (401, 403) else "REDIRECT")
-            rows.append([p, f"{clr}{r['code']}{C.RST}",
-                         f"{C.Y}{C.BLD}{cms}{C.RST}", f"{clr}{C.BLD}{lbl}{C.RST}"])
+            rows.append([p, f"{clr}{r['code']}{C.RST}", f"{C.Y}{C.BLD}{cms}{C.RST}", f"{clr}{C.BLD}{lbl}{C.RST}"])
         else:
-            rows.append([f"{C.DIM}{p}{C.RST}", f"{C.DIM}{r['code']}{C.RST}",
-                         f"{C.DIM}-{C.RST}", f"{C.G}N/A{C.RST}"])
+            rows.append([f"{C.DIM}{p}{C.RST}", f"{C.DIM}{r['code']}{C.RST}", f"{C.DIM}-{C.RST}", f"{C.G}N/A{C.RST}"])
 
     print()
     draw_table(hdr, rows)
-    safe_n = len(results) - found_n
     print()
     if found_n:
-        # Collect unique CMS detected
         detected = set(r["cms"] for r in results if r["found"] and r["cms"])
         cms_str = ", ".join(sorted(detected)) if detected else "Nao identificado"
         draw_box([
-            f"  {C.R}{C.BLD}{found_n} painel(is) encontrado(s){C.RST} {C.DIM}|{C.RST} {C.G}{safe_n} nao encontrado(s){C.RST}",
+            f"  {C.R}{C.BLD}{found_n} painel(is) encontrado(s){C.RST} {C.DIM}|{C.RST} {C.G}{len(results) - found_n} nao encontrado(s){C.RST}",
             f"  {C.W}Tecnologia detectada: {C.Y}{C.BLD}{cms_str}{C.RST}",
-            f"  {C.Y}Paineis expostos sao alvos de brute-force!{C.RST}",
         ], width=w, title=f"{C.Y}{C.BLD}RESULTADO{C.RST}", bc=C.Y)
     else:
-        draw_box([
-            f"  {C.G}{C.BLD}Nenhum painel de admin encontrado.{C.RST}",
-        ], width=w, title=f"{C.G}{C.BLD}RESULTADO{C.RST}", bc=C.G)
+        draw_box([f"  {C.G}{C.BLD}Nenhum painel de admin encontrado.{C.RST}"],
+                 width=w, title=f"{C.G}{C.BLD}RESULTADO{C.RST}", bc=C.G)
     return results
 
 
 # ─────────────────────────────────────────────────────
-#  Module 5: Public Vulnerability Scanner (CVE Lookup)
+#  Module 5: Async CVE Scanner
 # ─────────────────────────────────────────────────────
 
 def _extract_software_versions(headers):
-    """
-    Extract software names and versions from HTTP response headers.
-    Returns a list of (software_name, version_string) tuples.
-    """
     software = []
-    # Server header (e.g., "Apache/2.4.41 (Ubuntu)")
     server = headers.get("Server", "")
     if server:
-        # Parse tokens like "Apache/2.4.41" or "nginx/1.18.0"
         for token in server.replace(",", " ").split():
             if "/" in token:
                 parts = token.split("/", 1)
-                name = parts[0].strip("()").strip()
-                ver = parts[1].strip("()").strip()
+                name, ver = parts[0].strip("()").strip(), parts[1].strip("()").strip()
                 if name and ver and any(c.isdigit() for c in ver):
                     software.append((name, ver))
-            elif token.lower() not in ("(ubuntu)", "(debian)", "(centos)", "(win64)", "(win32)"):
-                # Standalone server name without version
-                if any(c.isalpha() for c in token) and token not in ("(", ")"):
-                    pass  # Skip tokens without version info
-
-    # X-Powered-By header (e.g., "PHP/7.4.3")
     powered = headers.get("X-Powered-By", "")
     if powered:
         for token in powered.replace(",", " ").split():
             if "/" in token:
                 parts = token.split("/", 1)
-                name = parts[0].strip()
-                ver = parts[1].strip()
+                name, ver = parts[0].strip(), parts[1].strip()
                 if name and ver and any(c.isdigit() for c in ver):
                     software.append((name, ver))
-
-    # X-AspNet-Version
     aspnet = headers.get("X-AspNet-Version", "")
     if aspnet:
         software.append(("ASP.NET", aspnet.strip()))
-
-    # X-AspNetMvc-Version
     mvc = headers.get("X-AspNetMvc-Version", "")
     if mvc:
         software.append(("ASP.NET MVC", mvc.strip()))
-
     return software
 
 
-def _query_nvd_cves(keyword, max_results=5, timeout=15):
-    """
-    Query the NIST NVD API for CVEs matching a keyword.
-    Returns a list of dicts: {cve_id, severity, description}.
-    Uses the public API (no API key required, rate-limited).
-    """
+async def _query_nvd_cves(session, keyword, max_results=5, timeout=15):
     api_url = "https://services.nvd.nist.gov/rest/json/cves/2.0"
-    params = {
-        "keywordSearch": keyword,
-        "resultsPerPage": max_results,
-    }
+    params = {"keywordSearch": keyword, "resultsPerPage": max_results}
+    url = f"{api_url}?{urlencode(params)}"
     try:
-        resp = requests.get(api_url, params=params, timeout=timeout, verify=True)
-        if resp.status_code != 200:
-            return []
-        data = resp.json()
-    except (Timeout, ConnectionError, RequestException, json.JSONDecodeError):
+        ctx = ssl.create_default_context()
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=timeout), ssl=ctx,
+                               headers={"User-Agent": random.choice(USER_AGENTS)}) as resp:
+            if resp.status != 200:
+                return []
+            data = await resp.json()
+    except (asyncio.TimeoutError, aiohttp.ClientError, json.JSONDecodeError, Exception):
         return []
 
     cves = []
     for vuln in data.get("vulnerabilities", []):
         cve_data = vuln.get("cve", {})
         cve_id = cve_data.get("id", "N/A")
-
-        # Extract severity from CVSS v3.1 or v3.0 or v2.0
         severity = "N/A"
         metrics = cve_data.get("metrics", {})
         for key in ("cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
@@ -828,223 +897,150 @@ def _query_nvd_cves(keyword, max_results=5, timeout=15):
             if metric_list:
                 cvss = metric_list[0].get("cvssData", {})
                 score = cvss.get("baseScore", "N/A")
-                sev_label = metric_list[0].get("baseSeverity",
-                            cvss.get("baseSeverity", "N/A"))
+                sev_label = metric_list[0].get("baseSeverity", cvss.get("baseSeverity", "N/A"))
                 severity = f"{score} ({sev_label})"
                 break
-
-        # Extract description (English)
         desc = "Sem descricao disponivel."
         for d in cve_data.get("descriptions", []):
             if d.get("lang") == "en":
                 desc = d.get("value", desc)[:80]
                 break
-
         cves.append({"cve_id": cve_id, "severity": severity, "description": desc})
-
     return cves
 
 
-def run_cve_scanner(target, timeout=10):
-    """Run the CVE Lookup module based on HTTP header fingerprinting."""
+async def run_cve_scanner(target, http_client=None, timeout=10):
     w = get_panel_width()
     print(BANNER_MINI)
+    client = http_client or AsyncHttpClient(timeout=timeout)
     draw_box([
         f"  {C.W}Alvo: {C.BLD}{target['url']}{C.RST}",
         f"  {C.DIM}Coleta versoes dos headers HTTP e consulta{C.RST}",
         f"  {C.DIM}a API publica do NIST NVD por CVEs conhecidas.{C.RST}",
     ], width=w, title=f"{C.CY}{C.BLD}SCANNER DE CVEs{C.RST}")
 
-    # Step 1: Fetch headers
     print()
     sp = Spinner("Coletando headers do servidor...")
     sp.start()
     try:
-        resp = requests.get(target["url"], timeout=timeout, allow_redirects=True, verify=False)
-    except (Timeout, ConnectionError, RequestException) as e:
+        async with aiohttp.ClientSession() as session:
+            resp = await client.get(session, target["url"])
+    except NetworkError as e:
         sp.stop()
-        print()
-        draw_box([f"  {C.R}Falha na conexao: {e}{C.RST}"], width=w,
-                 title=f"{C.R}{C.BLD}ERRO{C.RST}", bc=C.R)
+        draw_box([f"  {C.R}Falha na conexao: {e}{C.RST}"], width=w, title=f"{C.R}{C.BLD}ERRO{C.RST}", bc=C.R)
         return []
     sp.stop(f"HTTP {resp.status_code} — Headers coletados")
 
-    # Step 2: Extract software versions
     software = _extract_software_versions(resp.headers)
-
     if not software:
         print()
         draw_box([
             f"  {C.G}Nenhum software com versao exposta nos headers.{C.RST}",
-            f"  {C.DIM}O servidor nao revelou versoes em Server,{C.RST}",
-            f"  {C.DIM}X-Powered-By ou outros headers comuns.{C.RST}",
         ], width=w, title=f"{C.G}{C.BLD}RESULTADO{C.RST}", bc=C.G)
         return []
 
-    # Show detected software
-    sw_lines = []
-    for name, ver in software:
-        sw_lines.append(f"  {C.Y}▸{C.RST} {C.W}{C.BLD}{name}{C.RST} {C.DIM}v{ver}{C.RST}")
+    sw_lines = [f"  {C.Y}▸{C.RST} {C.W}{C.BLD}{n}{C.RST} {C.DIM}v{v}{C.RST}" for n, v in software]
     print()
     draw_box(sw_lines, width=w, title=f"{C.CY}{C.BLD}SOFTWARE DETECTADO{C.RST}")
 
-    # Step 3: Query NVD for each software
     all_cves = []
-    for name, ver in software:
-        keyword = f"{name} {ver}"
-        print()
-        sp = Spinner(f"Consultando NVD para {name} {ver}...")
-        sp.start()
-        cves = _query_nvd_cves(keyword)
-        sp.stop(f"{len(cves)} CVE(s) encontrada(s) para {name} {ver}")
-
-        if cves:
-            hdr_def = [("CVE ID", 18), ("Severidade", 16), ("Descricao", 28)]
-            rows = []
-            for c in cves:
-                sev = c["severity"]
-                # Color based on severity
-                if "CRITICAL" in sev.upper():
-                    sev_display = f"{C.R}{C.BLD}{sev}{C.RST}"
-                elif "HIGH" in sev.upper():
-                    sev_display = f"{C.R}{sev}{C.RST}"
-                elif "MEDIUM" in sev.upper():
-                    sev_display = f"{C.Y}{sev}{C.RST}"
-                else:
-                    sev_display = f"{C.DIM}{sev}{C.RST}"
-
-                desc = c["description"][:26] + ".." if len(c["description"]) > 28 else c["description"]
-                rows.append([c["cve_id"], sev_display, desc])
-            all_cves.extend(cves)
-
+    async with aiohttp.ClientSession() as session:
+        for name, ver in software:
+            keyword = f"{name} {ver}"
             print()
-            draw_table(hdr_def, rows)
+            sp = Spinner(f"Consultando NVD para {name} {ver}...")
+            sp.start()
+            cves = await _query_nvd_cves(session, keyword)
+            sp.stop(f"{len(cves)} CVE(s) encontrada(s) para {name} {ver}")
+            if cves:
+                hdr_def = [("CVE ID", 18), ("Severidade", 16), ("Descricao", 28)]
+                rows = []
+                for c in cves:
+                    sev = c["severity"]
+                    if "CRITICAL" in sev.upper():
+                        sd = f"{C.R}{C.BLD}{sev}{C.RST}"
+                    elif "HIGH" in sev.upper():
+                        sd = f"{C.R}{sev}{C.RST}"
+                    elif "MEDIUM" in sev.upper():
+                        sd = f"{C.Y}{sev}{C.RST}"
+                    else:
+                        sd = f"{C.DIM}{sev}{C.RST}"
+                    desc = c["description"][:26] + ".." if len(c["description"]) > 28 else c["description"]
+                    rows.append([c["cve_id"], sd, desc])
+                all_cves.extend(cves)
+                print()
+                draw_table(hdr_def, rows)
+            if len(software) > 1:
+                await asyncio.sleep(2)
 
-        # NVD rate limit: be nice (6 sec between calls without API key)
-        if len(software) > 1:
-            time.sleep(2)
-
-    # Final summary
-    total = len(all_cves)
     print()
-    if total:
+    if all_cves:
         draw_box([
-            f"  {C.R}{C.BLD}{total} CVE(s) publica(s) encontrada(s){C.RST}",
+            f"  {C.R}{C.BLD}{len(all_cves)} CVE(s) publica(s) encontrada(s){C.RST}",
             f"  {C.W}Software:  {C.Y}{', '.join(f'{n} {v}' for n, v in software)}{C.RST}",
-            f"  {C.Y}Versoes expostas facilitam ataques direcionados!{C.RST}",
         ], width=w, title=f"{C.Y}{C.BLD}RESULTADO{C.RST}", bc=C.Y)
     else:
-        draw_box([
-            f"  {C.G}{C.BLD}Nenhuma CVE publica encontrada.{C.RST}",
-            f"  {C.DIM}Isso nao garante seguranca total.{C.RST}",
-        ], width=w, title=f"{C.G}{C.BLD}RESULTADO{C.RST}", bc=C.G)
+        draw_box([f"  {C.G}{C.BLD}Nenhuma CVE publica encontrada.{C.RST}"],
+                 width=w, title=f"{C.G}{C.BLD}RESULTADO{C.RST}", bc=C.G)
     return all_cves
 
 
 # ─────────────────────────────────────────────────────
-#  Module 6: Exposed Cloud Bucket Checker
+#  Module 6: Async Cloud Bucket Checker
 # ─────────────────────────────────────────────────────
 
-# Common bucket URL patterns to test
 def _generate_bucket_urls(hostname):
-    """
-    Generate potential cloud bucket URLs based on the target hostname.
-    Tests common naming conventions for S3, Azure Blob, and GCS.
-    """
-    # Strip common prefixes to get the base domain name
     base = hostname.replace("www.", "").split(".")[0]
     buckets = []
-
-    # Amazon S3 patterns
     s3_names = [base, f"{base}-backup", f"{base}-assets", f"{base}-static",
                 f"{base}-media", f"{base}-uploads", f"{base}-data",
                 f"{base}-dev", f"{base}-staging", f"{base}-prod",
                 f"{base}-public", f"{base}-private", f"{base}-logs"]
     for name in s3_names:
-        buckets.append({
-            "url": f"https://{name}.s3.amazonaws.com",
-            "provider": "AWS S3",
-            "bucket": name,
-        })
-
-    # Azure Blob Storage patterns
-    azure_names = [base, f"{base}storage", f"{base}data"]
-    for name in azure_names:
-        buckets.append({
-            "url": f"https://{name}.blob.core.windows.net",
-            "provider": "Azure Blob",
-            "bucket": name,
-        })
-
-    # Google Cloud Storage patterns
-    gcs_names = [base, f"{base}-public", f"{base}-assets"]
-    for name in gcs_names:
-        buckets.append({
-            "url": f"https://storage.googleapis.com/{name}",
-            "provider": "Google GCS",
-            "bucket": name,
-        })
-
+        buckets.append({"url": f"https://{name}.s3.amazonaws.com", "provider": "AWS S3", "bucket": name})
+    for name in [base, f"{base}storage", f"{base}data"]:
+        buckets.append({"url": f"https://{name}.blob.core.windows.net", "provider": "Azure Blob", "bucket": name})
+    for name in [base, f"{base}-public", f"{base}-assets"]:
+        buckets.append({"url": f"https://storage.googleapis.com/{name}", "provider": "Google GCS", "bucket": name})
     return buckets
 
 
-def _check_single_bucket(bucket_info, timeout):
-    """
-    Check if a cloud bucket exists and is publicly accessible.
-    Returns the bucket_info dict augmented with 'status' and 'public' fields.
-    """
+async def _check_bucket(session, bucket_info, timeout):
     url = bucket_info["url"]
     try:
-        resp = requests.get(
-            url, timeout=timeout, allow_redirects=True, verify=True,
-            headers={"User-Agent": "VulnRecon/3.0 (Security Audit)"}
-        )
-        code = resp.status_code
-        body = resp.text[:2000].lower()
-
-        # Determine status
-        if code == 200:
-            # Check if it's actually listing contents (public read)
-            is_listing = any(marker in body for marker in [
-                "<listbucketresult",   # S3 XML listing
-                "<enumerationresults",  # Azure XML listing
-                "<listresult",          # GCS listing
-                "<contents>",           # S3 contents
-                "\"items\":",           # GCS JSON
-            ])
-            bucket_info["status"] = "PUBLICO" if is_listing else "EXISTE"
-            bucket_info["public"] = is_listing
+        ctx = ssl.create_default_context()
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=timeout), ssl=ctx,
+                               headers={"User-Agent": random.choice(USER_AGENTS)}) as resp:
+            code = resp.status
+            body = (await resp.text(errors="replace"))[:2000].lower()
+            if code == 200:
+                is_listing = any(m in body for m in ["<listbucketresult", "<enumerationresults", "<listresult", "<contents>", '"items":'])
+                bucket_info["status"] = "PUBLICO" if is_listing else "EXISTE"
+                bucket_info["public"] = is_listing
+            elif code == 403:
+                bucket_info["status"] = "PRIVADO"
+                bucket_info["public"] = False
+            elif code == 404:
+                bucket_info["status"] = "NAO EXISTE"
+                bucket_info["public"] = False
+            else:
+                bucket_info["status"] = f"HTTP {code}"
+                bucket_info["public"] = False
             bucket_info["code"] = code
-        elif code == 403:
-            bucket_info["status"] = "PRIVADO"
-            bucket_info["public"] = False
-            bucket_info["code"] = code
-        elif code == 404:
-            bucket_info["status"] = "NAO EXISTE"
-            bucket_info["public"] = False
-            bucket_info["code"] = code
-        else:
-            bucket_info["status"] = f"HTTP {code}"
-            bucket_info["public"] = False
-            bucket_info["code"] = code
-
-    except (Timeout, ConnectionError, RequestException):
+    except (asyncio.TimeoutError, aiohttp.ClientError, OSError):
         bucket_info["status"] = "TIMEOUT"
         bucket_info["public"] = False
         bucket_info["code"] = None
-
     return bucket_info
 
 
-def run_cloud_checker(target, timeout=5, threads=10):
-    """Run the Exposed Cloud Bucket Checker module."""
+async def run_cloud_checker(target, http_client=None, timeout=5, concurrency=15):
     w = get_panel_width()
     print(BANNER_MINI)
-
     buckets = _generate_bucket_urls(target["hostname"])
     draw_box([
         f"  {C.W}Alvo:      {C.BLD}{target['hostname']}{C.RST}",
-        f"  {C.W}Buckets:   {C.BLD}{len(buckets)}{C.RST} combinacoes testadas",
+        f"  {C.W}Buckets:   {C.BLD}{len(buckets)}{C.RST} combinacoes | Async",
         f"  {C.W}Providers: {C.BLD}AWS S3, Azure Blob, Google GCS{C.RST}",
     ], width=w, title=f"{C.CY}{C.BLD}VERIFICADOR DE BUCKETS NA NUVEM{C.RST}")
 
@@ -1052,231 +1048,186 @@ def run_cloud_checker(target, timeout=5, threads=10):
     sp = Spinner("Verificando buckets na nuvem...")
     sp.start()
     t0 = time.time()
-    results = []
-    with ThreadPoolExecutor(max_workers=threads) as ex:
-        futs = {ex.submit(_check_single_bucket, b, timeout): b["url"] for b in buckets}
-        for f in as_completed(futs):
-            try:
-                results.append(f.result())
-            except Exception:
-                pass
+    sem = asyncio.Semaphore(concurrency)
+    async with aiohttp.ClientSession() as session:
+        async def _guarded(b):
+            async with sem:
+                return await _check_bucket(session, b, timeout)
+        results = await asyncio.gather(*[_guarded(b) for b in buckets], return_exceptions=True)
+    results = [r if isinstance(r, dict) else {"status": "ERRO", "public": False, "provider": "?", "bucket": "?"} for r in results]
     elapsed = time.time() - t0
     sp.stop(f"Verificacao concluida em {elapsed:.2f}s")
 
-    # Sort: public first, then exists, then rest
     priority = {"PUBLICO": 0, "EXISTE": 1, "PRIVADO": 2}
-    results.sort(key=lambda r: (priority.get(r["status"], 9), r["provider"], r["bucket"]))
-
+    results.sort(key=lambda r: (priority.get(r.get("status", ""), 9), r.get("provider", ""), r.get("bucket", "")))
     hdr = [("Provider", 12), ("Bucket", 20), ("Status", 12), ("Risco", 10)]
     rows = []
-    public_n = 0
-    exists_n = 0
+    public_n = exists_n = 0
     for r in results:
-        bname = r["bucket"][:18] + ".." if len(r["bucket"]) > 20 else r["bucket"]
-        st = r["status"]
+        bname = r.get("bucket", "?")
+        bname = bname[:18] + ".." if len(bname) > 20 else bname
+        st = r.get("status", "?")
         if st == "PUBLICO":
-            public_n += 1
-            exists_n += 1
-            rows.append([r["provider"], bname,
-                         f"{C.R}{C.BLD}{st}{C.RST}", f"{C.R}{C.BLD}CRITICO{C.RST}"])
+            public_n += 1; exists_n += 1
+            rows.append([r.get("provider","?"), bname, f"{C.R}{C.BLD}{st}{C.RST}", f"{C.R}{C.BLD}CRITICO{C.RST}"])
         elif st == "EXISTE":
             exists_n += 1
-            rows.append([r["provider"], bname,
-                         f"{C.Y}{st}{C.RST}", f"{C.Y}MEDIO{C.RST}"])
+            rows.append([r.get("provider","?"), bname, f"{C.Y}{st}{C.RST}", f"{C.Y}MEDIO{C.RST}"])
         elif st == "PRIVADO":
             exists_n += 1
-            rows.append([r["provider"], bname,
-                         f"{C.G}{st}{C.RST}", f"{C.G}BAIXO{C.RST}"])
-        elif st == "NAO EXISTE":
-            rows.append([f"{C.DIM}{r['provider']}{C.RST}", f"{C.DIM}{bname}{C.RST}",
-                         f"{C.DIM}{st}{C.RST}", f"{C.DIM}-{C.RST}"])
+            rows.append([r.get("provider","?"), bname, f"{C.G}{st}{C.RST}", f"{C.G}BAIXO{C.RST}"])
         else:
-            rows.append([f"{C.DIM}{r['provider']}{C.RST}", f"{C.DIM}{bname}{C.RST}",
-                         f"{C.DIM}{st}{C.RST}", f"{C.DIM}-{C.RST}"])
+            rows.append([f"{C.DIM}{r.get('provider','?')}{C.RST}", f"{C.DIM}{bname}{C.RST}", f"{C.DIM}{st}{C.RST}", f"{C.DIM}-{C.RST}"])
 
     print()
     draw_table(hdr, rows)
     print()
-
     if public_n:
-        draw_box([
-            f"  {C.R}{C.BLD}{public_n} bucket(s) PUBLICO(S) encontrado(s)!{C.RST}",
-            f"  {C.Y}Buckets publicos podem vazar dados sensiveis,{C.RST}",
-            f"  {C.Y}backups e credenciais. Risco CRITICO!{C.RST}",
-        ], width=w, title=f"{C.R}{C.BLD}RESULTADO{C.RST}", bc=C.R)
+        draw_box([f"  {C.R}{C.BLD}{public_n} bucket(s) PUBLICO(S)! Risco CRITICO!{C.RST}"],
+                 width=w, title=f"{C.R}{C.BLD}RESULTADO{C.RST}", bc=C.R)
     elif exists_n:
-        draw_box([
-            f"  {C.Y}{C.BLD}{exists_n} bucket(s) encontrado(s), nenhum publico.{C.RST}",
-            f"  {C.DIM}Buckets existem mas requerem autenticacao.{C.RST}",
-        ], width=w, title=f"{C.Y}{C.BLD}RESULTADO{C.RST}", bc=C.Y)
+        draw_box([f"  {C.Y}{C.BLD}{exists_n} bucket(s) encontrado(s), nenhum publico.{C.RST}"],
+                 width=w, title=f"{C.Y}{C.BLD}RESULTADO{C.RST}", bc=C.Y)
     else:
-        draw_box([
-            f"  {C.G}{C.BLD}Nenhum bucket na nuvem encontrado.{C.RST}",
-        ], width=w, title=f"{C.G}{C.BLD}RESULTADO{C.RST}", bc=C.G)
+        draw_box([f"  {C.G}{C.BLD}Nenhum bucket na nuvem encontrado.{C.RST}"],
+                 width=w, title=f"{C.G}{C.BLD}RESULTADO{C.RST}", bc=C.G)
     return results
 
 
 # ─────────────────────────────────────────────────────
-#  Module 7: WAF Detection (Pre-Scan)
+#  Module 7: Async WAF Detector
 # ─────────────────────────────────────────────────────
 
-WAF_SIGNATURES = {
-    "Cloudflare":  ["cloudflare", "cf-ray", "cf-cache-status", "__cfduid"],
-    "Akamai":      ["akamai", "x-akamai", "akamaighost"],
-    "Sucuri":      ["sucuri", "x-sucuri"],
-    "AWS WAF":     ["awselb", "x-amzn", "x-amz-cf"],
-    "Imperva":     ["imperva", "incapsula", "x-iinfo"],
-    "F5 BIG-IP":   ["bigip", "f5", "x-wa-info"],
-    "ModSecurity": ["mod_security", "modsecurity"],
-    "Barracuda":   ["barracuda", "barra_counter"],
-    "Fortinet":    ["fortigate", "fortiWeb"],
-    "Wordfence":   ["wordfence"],
-}
-
-
-def run_waf_detector(target, timeout=10):
-    """Detect Web Application Firewalls via header analysis and probe."""
+async def run_waf_detector(target, http_client=None, timeout=10):
     w = get_panel_width()
     print(BANNER_MINI)
+    client = http_client or AsyncHttpClient(timeout=timeout)
     draw_box([
         f"  {C.W}Alvo: {C.BLD}{target['url']}{C.RST}",
         f"  {C.DIM}Analise passiva de headers + probe inofensivo.{C.RST}",
     ], width=w, title=f"{C.CY}{C.BLD}DETETOR DE WAF{C.RST}")
-
     detected = []
 
-    # Phase 1: Normal request header analysis
     print()
     sp = Spinner("Analisando headers do servidor...")
     sp.start()
     try:
-        resp = _vr_get(target["url"], timeout=timeout)
-        all_headers = str(resp.headers).lower()
-        server = resp.headers.get("Server", "").lower()
-
-        for waf_name, patterns in WAF_SIGNATURES.items():
-            for p in patterns:
-                if p.lower() in all_headers or p.lower() in server:
-                    detected.append({"waf": waf_name, "evidence": p, "method": "Headers"})
-                    break
-    except (Timeout, ConnectionError, RequestException):
+        async with aiohttp.ClientSession() as session:
+            resp = await client.get(session, target["url"])
+            all_headers = str(resp.headers).lower()
+            for waf_name, patterns in WAF_SIGNATURES.items():
+                for p in patterns:
+                    if p.lower() in all_headers:
+                        detected.append({"waf": waf_name, "evidence": p, "method": "Headers"})
+                        break
+    except NetworkError:
         sp.stop()
-        draw_box([f"  {C.R}Falha na conexao.{C.RST}"], width=w, bc=C.R,
-                 title=f"{C.R}{C.BLD}ERRO{C.RST}")
+        draw_box([f"  {C.R}Falha na conexao.{C.RST}"], width=w, bc=C.R, title=f"{C.R}{C.BLD}ERRO{C.RST}")
         return detected
-    sp.stop(f"Headers analisados")
+    sp.stop("Headers analisados")
 
-    # Phase 2: Probe with blockable (but harmless) payload
     print()
     sp = Spinner("Enviando probe inofensivo para detecao de WAF...")
     sp.start()
     probe_url = target["url"].rstrip("/") + "/?id=<script>alert(1)</script>"
     try:
-        probe_resp = _vr_get(probe_url, timeout=timeout)
-        probe_headers = str(probe_resp.headers).lower()
-        probe_body = probe_resp.text[:3000].lower()
-
-        # Check if probe triggered WAF
-        for waf_name, patterns in WAF_SIGNATURES.items():
-            for p in patterns:
-                if p.lower() in probe_headers or p.lower() in probe_body:
-                    if not any(d["waf"] == waf_name for d in detected):
-                        detected.append({"waf": waf_name, "evidence": p, "method": "Probe"})
-                    break
-
-        # Check for WAF-like blocking behavior
-        if probe_resp.status_code in (403, 406, 429, 503):
-            if not detected:
-                detected.append({"waf": "Desconhecido", "evidence": f"HTTP {probe_resp.status_code} no probe", "method": "Probe"})
-
-    except (Timeout, ConnectionError, RequestException):
+        async with aiohttp.ClientSession() as session:
+            probe_resp = await client.get(session, probe_url)
+            probe_hdrs = str(probe_resp.headers).lower()
+            probe_body = probe_resp.text[:3000].lower()
+            for waf_name, patterns in WAF_SIGNATURES.items():
+                for p in patterns:
+                    if p.lower() in probe_hdrs or p.lower() in probe_body:
+                        if not any(d["waf"] == waf_name for d in detected):
+                            detected.append({"waf": waf_name, "evidence": p, "method": "Probe"})
+                        break
+            if probe_resp.status_code in (403, 406, 429, 503) and not detected:
+                detected.append({"waf": "Desconhecido", "evidence": f"HTTP {probe_resp.status_code}", "method": "Probe"})
+    except NetworkError:
         pass
-    sp.stop(f"Probe concluido")
+    sp.stop("Probe concluido")
 
-    # Display results
     print()
     if detected:
         hdr = [("WAF", 16), ("Evidencia", 24), ("Metodo", 10)]
         rows = [[d["waf"], d["evidence"], d["method"]] for d in detected]
         draw_table(hdr, rows)
-        unique_wafs = set(d["waf"] for d in detected)
         print()
         draw_box([
-            f"  {C.R}{C.BLD}{len(unique_wafs)} WAF(s) detectado(s)!{C.RST}",
-            f"  {C.W}Identificados: {C.Y}{C.BLD}{', '.join(unique_wafs)}{C.RST}",
+            f"  {C.R}{C.BLD}{len(set(d['waf'] for d in detected))} WAF(s) detectado(s)!{C.RST}",
             f"  {C.Y}O WAF pode bloquear scans e alterar resultados.{C.RST}",
         ], width=w, title=f"{C.R}{C.BLD}ALERTA{C.RST}", bc=C.R)
     else:
-        draw_box([
-            f"  {C.G}{C.BLD}Nenhum WAF detectado.{C.RST}",
-            f"  {C.DIM}O alvo nao parece ter firewall de aplicacao.{C.RST}",
-        ], width=w, title=f"{C.G}{C.BLD}RESULTADO{C.RST}", bc=C.G)
+        draw_box([f"  {C.G}{C.BLD}Nenhum WAF detectado.{C.RST}"],
+                 width=w, title=f"{C.G}{C.BLD}RESULTADO{C.RST}", bc=C.G)
     return detected
 
 
 # ─────────────────────────────────────────────────────
-#  Module 8: Passive Error-Based DB Scanner
+#  Module 8: Async DB Error Scanner (BeautifulSoup)
 # ─────────────────────────────────────────────────────
 
-# Syntax-breaking chars (NOT exploitation payloads — just syntax probes)
-_SYNTAX_PROBES = ["'", '"', "%00", "\\", ";", ")", "{{"]
+async def _extract_links_bs4(session, client, url):
+    """Extract all parameterized URLs from target page using BeautifulSoup."""
+    found_params = []
+    try:
+        resp = await client.get(session, url)
+        soup = BeautifulSoup(resp.text, "html.parser")
+    except NetworkError:
+        return found_params
 
-# DB error signatures to detect in response body
-_DB_ERROR_SIGS = [
-    ("SQL syntax", "MySQL"),
-    ("mysql_fetch", "MySQL"),
-    ("mysql_num_rows", "MySQL"),
-    ("You have an error in your SQL", "MySQL"),
-    ("pg_query", "PostgreSQL"),
-    ("pg_exec", "PostgreSQL"),
-    ("PSQLException", "PostgreSQL"),
-    ("unterminated quoted string", "PostgreSQL"),
-    ("ORA-", "Oracle"),
-    ("ODBC SQL Server", "MSSQL"),
-    ("SQLServer JDBC", "MSSQL"),
-    ("java.sql.SQLException", "Java/JDBC"),
-    ("sqlite3.OperationalError", "SQLite"),
-    ("near \":\": syntax error", "SQLite"),
-    ("PDOException", "PHP PDO"),
-    ("MongoError", "MongoDB"),
-]
+    base_parsed = urlparse(url)
+    raw_links = set()
+    for tag in soup.find_all("a", href=True):
+        raw_links.add(tag["href"])
+    for tag in soup.find_all("form", action=True):
+        raw_links.add(tag["action"])
+
+    for raw_link in raw_links:
+        if raw_link.startswith("/"):
+            full = f"{base_parsed.scheme}://{base_parsed.netloc}{raw_link}"
+        elif raw_link.startswith("http"):
+            full = raw_link
+        elif raw_link.startswith("?"):
+            full = f"{url.split('?')[0]}{raw_link}"
+        else:
+            continue
+        parsed = urlparse(full)
+        if parsed.query:
+            param_names = [p.split("=", 1)[0] for p in parsed.query.split("&") if "=" in p]
+            if param_names:
+                clean_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+                found_params.append({"url": clean_url, "params": param_names, "full_url": full})
+
+    seen = set()
+    unique = []
+    for item in found_params:
+        if item["url"] not in seen:
+            seen.add(item["url"])
+            unique.append(item)
+    return unique
 
 
-def _probe_param_for_errors(url, param, timeout):
-    """
-    Append a syntax-breaking character to a URL parameter
-    and check if the response leaks database error messages.
-    Does NOT exploit — only detects information disclosure.
-    """
+async def _probe_param_errors(session, client, url, param):
     findings = []
-    for probe in _SYNTAX_PROBES:
-        test_url = re.sub(
-            f"({re.escape(param)}=)[^&]*",
-            f"\\g<1>{probe}",
-            url
-        )
+    for probe in SYNTAX_PROBES:
+        test_url = re.sub(f"({re.escape(param)}=)[^&]*", lambda m: f"{m.group(1)}{probe}", url)
         try:
-            resp = _vr_get(test_url, timeout=timeout, allow_redirects=True)
+            resp = await client.get(session, test_url)
             body = resp.text[:8000]
-            for sig, db_type in _DB_ERROR_SIGS:
+            for sig, db_type in DB_ERROR_SIGS:
                 if sig.lower() in body.lower():
-                    findings.append({
-                        "param": param,
-                        "probe": probe,
-                        "db_type": db_type,
-                        "signature": sig,
-                        "url": test_url,
-                    })
-                    return findings  # One finding per param is enough
-        except (Timeout, ConnectionError, RequestException):
+                    findings.append({"param": param, "probe": probe, "db_type": db_type, "signature": sig, "url": test_url})
+                    return findings
+        except NetworkError:
             continue
     return findings
 
 
-def run_error_db_scanner(target, timeout=8):
-    """Run passive error-based DB scanner on discovered URL parameters."""
+async def run_error_db_scanner(target, http_client=None, timeout=8):
     w = get_panel_width()
     print(BANNER_MINI)
+    client = http_client or AsyncHttpClient(timeout=timeout)
     draw_box([
         f"  {C.W}Alvo: {C.BLD}{target['url']}{C.RST}",
         f"  {C.DIM}Detecta divulgacao de erros de BD via{C.RST}",
@@ -1285,54 +1236,47 @@ def run_error_db_scanner(target, timeout=8):
         f"  {C.Y}Nao explora falhas — apenas detecta e reporta.{C.RST}",
     ], width=w, title=f"{C.CY}{C.BLD}SCANNER DE ERROS DE BD{C.RST}")
 
-    # Step 1: Extract parameterized URLs from page
     print()
-    sp = Spinner("Extraindo URLs com parametros...")
+    sp = Spinner("Extraindo URLs com parametros (BeautifulSoup)...")
     sp.start()
-    param_urls = _extract_links_and_params(target["url"], timeout)
+    async with aiohttp.ClientSession() as session:
+        param_urls = await _extract_links_bs4(session, client, target["url"])
     sp.stop(f"{len(param_urls)} URL(s) com parametros encontrada(s)")
 
     if not param_urls:
         print()
-        draw_box([
-            f"  {C.G}Nenhum parametro encontrado para testar.{C.RST}",
-            f"  {C.DIM}O alvo nao expoe URLs com parametros.{C.RST}",
-        ], width=w, title=f"{C.G}{C.BLD}RESULTADO{C.RST}", bc=C.G)
+        draw_box([f"  {C.G}Nenhum parametro encontrado para testar.{C.RST}"],
+                 width=w, title=f"{C.G}{C.BLD}RESULTADO{C.RST}", bc=C.G)
         return []
 
-    # Step 2: Test each parameterized URL
     all_findings = []
     tested = 0
-    for item in param_urls[:15]:  # Limit to 15 URLs to avoid flooding
-        for param in item["params"][:3]:  # Max 3 params per URL
-            tested += 1
-            print()
-            sp = Spinner(f"Testando {param}=... ({tested})")
-            sp.start()
-            findings = _probe_param_for_errors(item["full_url"], param, timeout)
-            if findings:
-                sp.stop(f"Erro de BD detectado em '{param}'!")
-                all_findings.extend(findings)
-            else:
-                sp.stop(f"'{param}' — sem divulgacao")
+    async with aiohttp.ClientSession() as session:
+        for item in param_urls[:15]:
+            for param in item["params"][:3]:
+                tested += 1
+                print()
+                sp = Spinner(f"Testando {param}=... ({tested})")
+                sp.start()
+                findings = await _probe_param_errors(session, client, item["full_url"], param)
+                if findings:
+                    sp.stop(f"Erro de BD detectado em '{param}'!")
+                    all_findings.extend(findings)
+                else:
+                    sp.stop(f"'{param}' — sem divulgacao")
 
-    # Display results
     print()
     if all_findings:
         hdr = [("Parametro", 12), ("Banco", 12), ("Assinatura", 26), ("Probe", 6)]
         rows = []
         for f in all_findings:
             sig = f["signature"][:24] + ".." if len(f["signature"]) > 26 else f["signature"]
-            rows.append([f["param"], f"{C.R}{C.BLD}{f['db_type']}{C.RST}",
-                         sig, f"{C.R}{f['probe']}{C.RST}"])
+            rows.append([f["param"], f"{C.R}{C.BLD}{f['db_type']}{C.RST}", sig, f"{C.R}{f['probe']}{C.RST}"])
         draw_table(hdr, rows)
         print()
         draw_box([
             f"  {C.R}{C.BLD}{len(all_findings)} divulgacao(oes) de erro de BD!{C.RST}",
-            f"  {C.Y}Erros de BD expostos revelam tecnologia interna{C.RST}",
-            f"  {C.Y}e podem indicar vulnerabilidades de injection.{C.RST}",
-            "",
-            f"  {C.DIM}Reporte ao responsavel do sistema para correcao.{C.RST}",
+            f"  {C.Y}Erros de BD expostos revelam tecnologia interna.{C.RST}",
         ], width=w, title=f"{C.R}{C.BLD}RESULTADO CRITICO{C.RST}", bc=C.R)
     else:
         draw_box([
@@ -1343,411 +1287,152 @@ def run_error_db_scanner(target, timeout=8):
 
 
 # ─────────────────────────────────────────────────────
-#  Report Export
+#  Module 9: Async Surface Mapper
 # ─────────────────────────────────────────────────────
 
-def export_report(target, results_dict, output_path="report_vulnrecon.json"):
-    """Export all scan results to a structured JSON report file."""
-    w = get_panel_width()
-    report = {
-        "tool": "VulnRecon",
-        "version": "3.0",
-        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S %Z"),
-        "target": {
-            "hostname": target["hostname"],
-            "ip": target["ip"],
-            "url": target["url"],
-        },
-        "results": {},
-    }
-
-    # Serialize each module's results (filter non-serializable data)
-    for module_name, data in results_dict.items():
-        try:
-            json.dumps(data)  # Test serializability
-            report["results"][module_name] = data
-        except (TypeError, ValueError):
-            report["results"][module_name] = str(data)
-
-    try:
-        with open(output_path, "w", encoding="utf-8") as f:
-            json.dump(report, f, indent=2, ensure_ascii=False)
-        draw_box([
-            f"  {C.G}{C.BLD}Relatorio exportado com sucesso!{C.RST}",
-            f"  {C.W}Arquivo: {C.BLD}{output_path}{C.RST}",
-            f"  {C.DIM}{time.strftime('%Y-%m-%d %H:%M:%S')}{C.RST}",
-        ], width=w, title=f"{C.G}{C.BLD}EXPORTACAO{C.RST}", bc=C.G)
-    except (IOError, OSError) as e:
-        draw_box([
-            f"  {C.R}Falha ao salvar relatorio: {e}{C.RST}",
-        ], width=w, title=f"{C.R}{C.BLD}ERRO{C.RST}", bc=C.R)
-
-
-# ─────────────────────────────────────────────────────
-#  Module 9: Passive Attack Surface Mapper
-# ─────────────────────────────────────────────────────
-
-# Database management panels to probe (passive — just check if they exist)
-DB_PANEL_PATHS = [
-    ("/adminer.php", "Adminer"),
-    ("/adminer/", "Adminer"),
-    ("/phpmyadmin/", "phpMyAdmin"),
-    ("/pma/", "phpMyAdmin"),
-    ("/myadmin/", "phpMyAdmin"),
-    ("/phppgadmin/", "phpPgAdmin"),
-    ("/pgadmin/", "pgAdmin"),
-    ("/dbadmin/", "DB Admin"),
-    ("/mysql/", "MySQL Panel"),
-    ("/mongo-express/", "Mongo Express"),
-    ("/rockmongo/", "RockMongo"),
-    ("/redis-commander/", "Redis Commander"),
-    ("/elasticsearch/", "Elasticsearch"),
-    ("/_cat/indices", "Elasticsearch API"),
-    ("/_cluster/health", "Elasticsearch API"),
-    ("/solr/", "Apache Solr"),
-    ("/couchdb/", "CouchDB"),
-    ("/_utils/", "CouchDB Fauxton"),
-    ("/_all_dbs", "CouchDB API"),
-    ("/neo4j/", "Neo4j"),
-]
-
-# Patterns in HTML that indicate error/debug info disclosure
-ERROR_PATTERNS = [
-    ("SQL syntax", "ALTA", "Mensagem de erro SQL exposta"),
-    ("mysql_fetch", "ALTA", "Funcao MySQL exposta no output"),
-    ("pg_query", "ALTA", "Funcao PostgreSQL exposta"),
-    ("ORA-", "ALTA", "Erro Oracle Database exposto"),
-    ("ODBC SQL Server", "ALTA", "Erro MSSQL/ODBC exposto"),
-    ("Traceback (most recent call last)", "ALTA", "Stack trace Python exposto"),
-    ("at java.", "MEDIA", "Stack trace Java exposto"),
-    ("at org.", "MEDIA", "Stack trace Java/Spring exposto"),
-    ("Exception in thread", "MEDIA", "Excecao Java nao tratada"),
-    ("Warning: ", "MEDIA", "Warning PHP exposto"),
-    ("Fatal error", "ALTA", "Erro fatal PHP exposto"),
-    ("Notice: ", "BAIXA", "Notice PHP exposto"),
-    ("Parse error", "ALTA", "Erro de parse PHP exposto"),
-    ("Stack Trace:", "MEDIA", "Stack trace .NET exposto"),
-    ("Server Error in", "MEDIA", "Erro de servidor ASP.NET"),
-    ("X-Debug-Token", "MEDIA", "Symfony debug token exposto"),
-    ("DJANGO_SETTINGS_MODULE", "ALTA", "Config Django exposta"),
-    ("DEBUG = True", "ALTA", "Modo debug Django ativo"),
-    ("Laravel", "BAIXA", "Framework Laravel identificado"),
-    ("APP_DEBUG", "ALTA", "Debug mode Laravel exposto"),
-]
-
-
-def _probe_db_panel(base_url, path, panel_name, timeout):
-    """Check if a database management panel exists at the given path."""
+async def _probe_db_panel(session, client, base_url, path, panel_name):
     full_url = base_url.rstrip("/") + path
     try:
-        resp = requests.get(
-            full_url, timeout=timeout, allow_redirects=True, verify=False,
-            headers={"User-Agent": "VulnRecon/3.0 (Security Audit)"}
-        )
+        resp = await client.get(session, full_url)
         code = resp.status_code
-        found = code in (200, 301, 302, 401, 403)
-        return {"path": path, "panel": panel_name, "code": code, "found": found}
-    except (Timeout, ConnectionError, RequestException):
+        return {"path": path, "panel": panel_name, "code": code, "found": code in (200, 301, 302, 401, 403)}
+    except NetworkError:
         return {"path": path, "panel": panel_name, "code": None, "found": False}
 
 
-def _extract_links_and_params(url, timeout):
-    """
-    Fetch a page and extract all links with URL parameters.
-    Returns a list of dicts: {url, params: [list of param names]}.
-    This is purely passive — only reads the HTML, no injection.
-    """
-    found_params = []
-    try:
-        resp = requests.get(
-            url, timeout=timeout, allow_redirects=True, verify=False,
-            headers={"User-Agent": "VulnRecon/3.0 (Security Audit)"}
-        )
-        body = resp.text
-    except (Timeout, ConnectionError, RequestException):
-        return found_params
-
-    # Extract href values from HTML
-    href_pattern = re.compile(r'href=["\']([^"\'>]+)["\']', re.IGNORECASE)
-    action_pattern = re.compile(r'action=["\']([^"\'>]+)["\']', re.IGNORECASE)
-
-    all_urls = set()
-    for pattern in (href_pattern, action_pattern):
-        all_urls.update(pattern.findall(body))
-
-    # Parse each URL for query parameters
-    base_parsed = urlparse(url)
-    for raw_link in all_urls:
-        # Resolve relative URLs
-        if raw_link.startswith("/"):
-            full = f"{base_parsed.scheme}://{base_parsed.netloc}{raw_link}"
-        elif raw_link.startswith("http"):
-            full = raw_link
-        elif raw_link.startswith("?"):
-            full = f"{url.split('?')[0]}{raw_link}"
-        else:
-            continue
-
-        parsed = urlparse(full)
-        if parsed.query:
-            # Extract parameter names from query string
-            param_names = []
-            for part in parsed.query.split("&"):
-                if "=" in part:
-                    param_names.append(part.split("=", 1)[0])
-            if param_names:
-                clean_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
-                found_params.append({
-                    "url": clean_url,
-                    "params": param_names,
-                    "full_url": full,
-                })
-
-    # Deduplicate by URL
-    seen = set()
-    unique = []
-    for item in found_params:
-        key = item["url"]
-        if key not in seen:
-            seen.add(key)
-            unique.append(item)
-    return unique
-
-
-def _check_error_disclosure(url, timeout):
-    """
-    Fetch the target page and scan for error/debug disclosure patterns.
-    This is passive — only reads the normal response, no payloads sent.
-    Returns a list of dicts: {pattern, severity, description}.
-    """
+async def _check_error_disclosure(session, client, url):
     findings = []
     try:
-        resp = requests.get(
-            url, timeout=timeout, allow_redirects=True, verify=False,
-            headers={"User-Agent": "VulnRecon/3.0 (Security Audit)"}
-        )
-        body = resp.text
-        headers_str = str(resp.headers)
-    except (Timeout, ConnectionError, RequestException):
+        resp = await client.get(session, url)
+        search_text = (resp.text + str(resp.headers)).lower()
+    except NetworkError:
         return findings
-
-    search_text = body + headers_str
     for pattern, severity, description in ERROR_PATTERNS:
-        if pattern.lower() in search_text.lower():
-            findings.append({
-                "pattern": pattern,
-                "severity": severity,
-                "description": description,
-            })
+        if pattern.lower() in search_text:
+            findings.append({"pattern": pattern, "severity": severity, "description": description})
     return findings
 
 
-def run_surface_mapper(target, timeout=5, threads=10):
-    """Run the Passive Attack Surface Mapper module."""
+async def run_surface_mapper(target, http_client=None, timeout=5, concurrency=15):
     w = get_panel_width()
     print(BANNER_MINI)
+    client = http_client or AsyncHttpClient(timeout=timeout)
     draw_box([
         f"  {C.W}Alvo: {C.BLD}{target['url']}{C.RST}",
         f"  {C.DIM}Mapeamento passivo de superficie de ataque.{C.RST}",
-        f"  {C.DIM}Nenhum payload e enviado — apenas observacao.{C.RST}",
     ], width=w, title=f"{C.CY}{C.BLD}MAPEADOR DE SUPERFICIE DE ATAQUE{C.RST}")
-
     total_findings = 0
 
-    # ── Phase 1: Database Panel Discovery ──
+    # Phase 1: DB Panels
     print()
     sp = Spinner("Buscando paineis de banco de dados...")
     sp.start()
     t0 = time.time()
-    db_results = []
-    with ThreadPoolExecutor(max_workers=threads) as ex:
-        futs = {
-            ex.submit(_probe_db_panel, target["url"], path, name, timeout): path
-            for path, name in DB_PANEL_PATHS
-        }
-        for f in as_completed(futs):
-            try:
-                db_results.append(f.result())
-            except Exception:
-                db_results.append({"path": futs[f], "panel": "?", "code": None, "found": False})
-    elapsed = time.time() - t0
-    sp.stop(f"Busca concluida em {elapsed:.2f}s")
-
-    db_results.sort(key=lambda r: (not r["found"], r["path"]))
+    sem = asyncio.Semaphore(concurrency)
+    async with aiohttp.ClientSession() as session:
+        async def _g1(path, name):
+            async with sem:
+                return await _probe_db_panel(session, client, target["url"], path, name)
+        db_results = await asyncio.gather(*[_g1(p, n) for p, n in DB_PANEL_PATHS], return_exceptions=True)
+    db_results = [r if isinstance(r, dict) else {"path": "?", "panel": "?", "code": None, "found": False} for r in db_results]
+    sp.stop(f"Busca concluida em {time.time() - t0:.2f}s")
     db_found = [r for r in db_results if r["found"]]
+    total_findings += len(db_found)
 
     hdr = [("Rota", 24), ("Painel", 18), ("HTTP", 6), ("Status", 12)]
     rows = []
-    for r in db_results:
+    for r in sorted(db_results, key=lambda x: (not x["found"], x["path"])):
         p = r["path"][:22] + ".." if len(r["path"]) > 24 else r["path"]
         if r["code"] is None:
-            rows.append([f"{C.DIM}{p}{C.RST}", f"{C.DIM}{r['panel']}{C.RST}",
-                         f"{C.DIM}---{C.RST}", f"{C.DIM}TIMEOUT{C.RST}"])
+            rows.append([f"{C.DIM}{p}{C.RST}", f"{C.DIM}{r['panel']}{C.RST}", f"{C.DIM}---{C.RST}", f"{C.DIM}TIMEOUT{C.RST}"])
         elif r["found"]:
             clr = C.R if r["code"] == 200 else C.M
             lbl = "EXPOSTO" if r["code"] == 200 else "EXISTE"
-            rows.append([p, f"{C.Y}{C.BLD}{r['panel']}{C.RST}",
-                         f"{clr}{r['code']}{C.RST}", f"{clr}{C.BLD}{lbl}{C.RST}"])
+            rows.append([p, f"{C.Y}{C.BLD}{r['panel']}{C.RST}", f"{clr}{r['code']}{C.RST}", f"{clr}{C.BLD}{lbl}{C.RST}"])
         else:
-            rows.append([f"{C.DIM}{p}{C.RST}", f"{C.DIM}{r['panel']}{C.RST}",
-                         f"{C.DIM}{r['code']}{C.RST}", f"{C.G}N/A{C.RST}"])
-
+            rows.append([f"{C.DIM}{p}{C.RST}", f"{C.DIM}{r['panel']}{C.RST}", f"{C.DIM}{r['code']}{C.RST}", f"{C.G}N/A{C.RST}"])
     print()
     draw_table(hdr, rows)
-    total_findings += len(db_found)
 
-    if db_found:
-        panels_str = ", ".join(set(r["panel"] for r in db_found))
-        print()
-        draw_box([
-            f"  {C.R}{C.BLD}{len(db_found)} painel(is) de BD encontrado(s)!{C.RST}",
-            f"  {C.W}Tecnologias: {C.Y}{C.BLD}{panels_str}{C.RST}",
-        ], width=w, title=f"{C.R}{C.BLD}ALERTA{C.RST}", bc=C.R)
-
-    # ── Phase 2: URL Parameter Discovery ──
+    # Phase 2: URL params
     print()
-    sp = Spinner("Extraindo parametros de URLs da pagina...")
+    sp = Spinner("Extraindo parametros de URLs (BeautifulSoup)...")
     sp.start()
-    params = _extract_links_and_params(target["url"], timeout)
+    async with aiohttp.ClientSession() as session:
+        params = await _extract_links_bs4(session, client, target["url"])
     sp.stop(f"{len(params)} URL(s) com parametros encontrada(s)")
+    total_findings += len(params)
 
-    if params:
-        hdr2 = [("URL", 32), ("Parametros", 28)]
-        rows2 = []
-        for item in params[:20]:  # Limit display to 20 entries
-            url_display = item["url"]
-            if len(url_display) > 32:
-                url_display = url_display[:30] + ".."
-            p_str = ", ".join(item["params"][:5])  # Max 5 params shown
-            if len(item["params"]) > 5:
-                p_str += f" (+{len(item['params']) - 5})"
-            rows2.append([url_display, f"{C.Y}{p_str}{C.RST}"])
-        total_findings += len(params)
-
-        print()
-        draw_table(hdr2, rows2)
-        print()
-        draw_box([
-            f"  {C.Y}{C.BLD}{len(params)} endpoint(s) com parametros{C.RST}",
-            f"  {C.DIM}Parametros em URLs sao potenciais pontos{C.RST}",
-            f"  {C.DIM}de entrada para ataques de injection.{C.RST}",
-        ], width=w, title=f"{C.Y}{C.BLD}SUPERFICIE DE ATAQUE{C.RST}", bc=C.Y)
-    else:
-        print()
-        draw_box([
-            f"  {C.G}Nenhum parametro de URL encontrado na pagina.{C.RST}",
-        ], width=w, title=f"{C.G}{C.BLD}PARAMETROS{C.RST}", bc=C.G)
-
-    # ── Phase 3: Error/Debug Disclosure ──
+    # Phase 3: Error disclosure
     print()
     sp = Spinner("Analisando divulgacao de erros e debug...")
     sp.start()
-    errors = _check_error_disclosure(target["url"], timeout)
+    async with aiohttp.ClientSession() as session:
+        errors = await _check_error_disclosure(session, client, target["url"])
     sp.stop(f"{len(errors)} indicador(es) de divulgacao encontrado(s)")
+    total_findings += len(errors)
 
-    if errors:
-        err_lines = []
-        for e in errors:
-            sc = SEV_C.get(e["severity"], C.W)
-            err_lines.append(f"  {C.R}!{C.RST} {C.W}{e['pattern']}{C.RST} {sc}[{e['severity']}]{C.RST}")
-            err_lines.append(f"    {C.DIM}{e['description']}{C.RST}")
-        total_findings += len(errors)
-
-        print()
-        draw_box(err_lines, width=w, title=f"{C.R}{C.BLD}DIVULGACAO DE ERROS{C.RST}", bc=C.R)
-    else:
-        print()
-        draw_box([
-            f"  {C.G}Nenhum vazamento de erro/debug detectado.{C.RST}",
-        ], width=w, title=f"{C.G}{C.BLD}ERROR DISCLOSURE{C.RST}", bc=C.G)
-
-    # ── Final Report ──
+    # Final
     print()
     if total_findings:
-        risk_clr = C.R if total_findings >= 5 else C.Y
         draw_box([
-            f"  {C.W}{C.BLD}Relatorio de Superficie de Ataque{C.RST}",
-            "",
             f"  {C.CY}Paineis de BD expostos: {C.R if db_found else C.G}{C.BLD}{len(db_found)}{C.RST}",
             f"  {C.CY}URLs com parametros:    {C.Y if params else C.G}{C.BLD}{len(params)}{C.RST}",
             f"  {C.CY}Vazamentos de erro:     {C.R if errors else C.G}{C.BLD}{len(errors)}{C.RST}",
-            "",
-            f"  {C.W}Total de pontos de atencao: {risk_clr}{C.BLD}{total_findings}{C.RST}",
-            "",
-            f"  {C.DIM}Este relatorio nao executa nenhum ataque.{C.RST}",
-            f"  {C.DIM}Use-o para documentar e reportar falhas{C.RST}",
-            f"  {C.DIM}ao responsavel pelo sistema.{C.RST}",
+            f"  {C.W}Total de pontos de atencao: {C.R}{C.BLD}{total_findings}{C.RST}",
         ], width=w, title=f"{C.CY}{C.BLD}RESULTADO FINAL{C.RST}")
     else:
-        draw_box([
-            f"  {C.G}{C.BLD}Superficie de ataque minima detectada.{C.RST}",
-            f"  {C.DIM}Nenhum painel, parametro ou erro exposto.{C.RST}",
-        ], width=w, title=f"{C.G}{C.BLD}RESULTADO{C.RST}", bc=C.G)
-
-    return {
-        "db_panels": db_found,
-        "url_params": params,
-        "error_disclosures": errors,
-        "total": total_findings,
-    }
+        draw_box([f"  {C.G}{C.BLD}Superficie de ataque minima detectada.{C.RST}"],
+                 width=w, title=f"{C.G}{C.BLD}RESULTADO{C.RST}", bc=C.G)
+    return {"db_panels": db_found, "url_params": params, "error_disclosures": errors, "total": total_findings}
 
 
 # ─────────────────────────────────────────────────────
-#  Module 10: Passive Subdomain Enumeration (crt.sh)
+#  Module 10: Async Subdomain Enumeration (crt.sh)
 # ─────────────────────────────────────────────────────
 
-def run_subdomain_enum(target, timeout=15):
-    """Enumerate subdomains passively via crt.sh Certificate Transparency."""
+async def run_subdomain_enum(target, http_client=None, timeout=15):
     w = get_panel_width()
     print(BANNER_MINI)
     domain = target["hostname"]
     draw_box([
         f"  {C.W}Dominio: {C.BLD}{domain}{C.RST}",
         f"  {C.DIM}Consulta passiva ao crt.sh (Certificate Transparency).{C.RST}",
-        f"  {C.DIM}Nao toca no servidor alvo — apenas OSINT publico.{C.RST}",
     ], width=w, title=f"{C.CY}{C.BLD}ENUMERACAO DE SUBDOMINIOS{C.RST}")
 
     print()
     sp = Spinner("Consultando crt.sh...")
     sp.start()
+    subdomains = set()
     try:
-        resp = requests.get(
-            f"https://crt.sh/?q=%.{domain}&output=json",
-            timeout=timeout, headers={"User-Agent": _random_ua()}
-        )
-    except (Timeout, ConnectionError, RequestException) as e:
+        ctx = ssl.create_default_context()
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"https://crt.sh/?q=%.{domain}&output=json",
+                timeout=aiohttp.ClientTimeout(total=timeout), ssl=ctx,
+                headers={"User-Agent": random.choice(USER_AGENTS)}
+            ) as resp:
+                if resp.status != 200:
+                    sp.stop()
+                    draw_box([f"  {C.R}crt.sh retornou HTTP {resp.status}{C.RST}"],
+                             width=w, title=f"{C.R}{C.BLD}ERRO{C.RST}", bc=C.R)
+                    return []
+                entries = await resp.json(content_type=None)
+    except (asyncio.TimeoutError, aiohttp.ClientError, json.JSONDecodeError) as e:
         sp.stop()
         draw_box([f"  {C.R}Falha na conexao com crt.sh: {e}{C.RST}"],
                  width=w, title=f"{C.R}{C.BLD}ERRO{C.RST}", bc=C.R)
         return []
-    sp.stop(f"Resposta: HTTP {resp.status_code}")
+    sp.stop(f"Resposta: HTTP 200")
 
-    if resp.status_code != 200:
-        print()
-        draw_box([f"  {C.R}crt.sh retornou HTTP {resp.status_code}{C.RST}"],
-                 width=w, title=f"{C.R}{C.BLD}ERRO{C.RST}", bc=C.R)
-        return []
-
-    # Parse and deduplicate subdomains
-    try:
-        entries = resp.json()
-    except (json.JSONDecodeError, ValueError):
-        print()
-        draw_box([f"  {C.R}Resposta invalida do crt.sh.{C.RST}"],
-                 width=w, title=f"{C.R}{C.BLD}ERRO{C.RST}", bc=C.R)
-        return []
-
-    subdomains = set()
     for entry in entries:
         name = entry.get("name_value", "")
         for sub in name.split("\n"):
             sub = sub.strip().lower()
             if sub and "*" not in sub and sub.endswith(domain):
                 subdomains.add(sub)
-
     subdomains = sorted(subdomains)
 
-    # Display results
     print()
     if subdomains:
         hdr = [("Subdominio", 44), ("Status", 10)]
@@ -1759,57 +1444,22 @@ def run_subdomain_enum(target, timeout=15):
                 rows.append([f"{C.CY}{sd}{C.RST}", f"{C.G}encontrado{C.RST}"])
         draw_table(hdr, rows)
         print()
-        draw_box([
-            f"  {C.CY}{C.BLD}{len(subdomains)} subdominio(s) encontrado(s){C.RST}",
-            f"  {C.DIM}Fonte: Certificate Transparency (crt.sh){C.RST}",
-        ], width=w, title=f"{C.CY}{C.BLD}RESULTADO{C.RST}")
+        draw_box([f"  {C.CY}{C.BLD}{len(subdomains)} subdominio(s) encontrado(s){C.RST}"],
+                 width=w, title=f"{C.CY}{C.BLD}RESULTADO{C.RST}")
     else:
-        draw_box([
-            f"  {C.G}Nenhum subdominio encontrado para {domain}.{C.RST}",
-        ], width=w, title=f"{C.G}{C.BLD}RESULTADO{C.RST}", bc=C.G)
-
+        draw_box([f"  {C.G}Nenhum subdominio encontrado para {domain}.{C.RST}"],
+                 width=w, title=f"{C.G}{C.BLD}RESULTADO{C.RST}", bc=C.G)
     return subdomains
 
 
 # ─────────────────────────────────────────────────────
-#  Module 11: Technology / CMS Fingerprinting
+#  Module 11: Async Tech Fingerprinting (BeautifulSoup)
 # ─────────────────────────────────────────────────────
 
-_TECH_PATTERNS = [
-    # (pattern_in_body_or_headers, tech_name, category)
-    ("wp-content", "WordPress", "CMS"),
-    ("wp-includes", "WordPress", "CMS"),
-    ("wp-json", "WordPress", "CMS"),
-    ("/joomla", "Joomla", "CMS"),
-    ("Drupal", "Drupal", "CMS"),
-    ("Magento", "Magento", "CMS"),
-    ("Shopify", "Shopify", "CMS/E-commerce"),
-    ("Wix.com", "Wix", "CMS"),
-    ("squarespace", "Squarespace", "CMS"),
-    ("react", "React", "Frontend"),
-    ("__next", "Next.js", "Frontend"),
-    ("_nuxt", "Nuxt.js", "Frontend"),
-    ("ng-version", "Angular", "Frontend"),
-    ("vue.js", "Vue.js", "Frontend"),
-    ("jquery", "jQuery", "Frontend"),
-    ("bootstrap", "Bootstrap", "CSS"),
-    ("tailwindcss", "TailwindCSS", "CSS"),
-    ("laravel", "Laravel", "Backend"),
-    ("csrfmiddlewaretoken", "Django", "Backend"),
-    ("__rails", "Ruby on Rails", "Backend"),
-    ("express", "Express.js", "Backend"),
-    ("phpmyadmin", "phpMyAdmin", "Database"),
-    ("google-analytics", "Google Analytics", "Analytics"),
-    ("gtag", "Google Tag Manager", "Analytics"),
-    ("cloudflare", "Cloudflare", "CDN/WAF"),
-    ("recaptcha", "reCAPTCHA", "Security"),
-]
-
-
-def run_tech_fingerprint(target, timeout=10):
-    """Fingerprint technologies by analyzing headers and HTML body."""
+async def run_tech_fingerprint(target, http_client=None, timeout=10):
     w = get_panel_width()
     print(BANNER_MINI)
+    client = http_client or AsyncHttpClient(timeout=timeout)
     draw_box([
         f"  {C.W}Alvo: {C.BLD}{target['url']}{C.RST}",
         f"  {C.DIM}Analisa headers e HTML para identificar tecnologias.{C.RST}",
@@ -1819,42 +1469,35 @@ def run_tech_fingerprint(target, timeout=10):
     sp = Spinner("Analisando tecnologias...")
     sp.start()
     try:
-        resp = _vr_get(target["url"], timeout=timeout)
-        body = resp.text[:30000].lower()
-        raw_headers = str(resp.headers).lower()
-    except (Timeout, ConnectionError, RequestException) as e:
+        async with aiohttp.ClientSession() as session:
+            resp = await client.get(session, target["url"])
+    except NetworkError as e:
         sp.stop()
-        draw_box([f"  {C.R}Falha na conexao: {e}{C.RST}"],
-                 width=w, title=f"{C.R}{C.BLD}ERRO{C.RST}", bc=C.R)
+        draw_box([f"  {C.R}Falha na conexao: {e}{C.RST}"], width=w, title=f"{C.R}{C.BLD}ERRO{C.RST}", bc=C.R)
         return []
     sp.stop("Pagina analisada")
 
     detected = []
-
-    # Check Server header
     server = resp.headers.get("Server", "")
     if server:
         detected.append({"tech": server, "category": "Servidor", "source": "Header: Server"})
-
-    # Check X-Powered-By
     powered = resp.headers.get("X-Powered-By", "")
     if powered:
         detected.append({"tech": powered, "category": "Backend", "source": "Header: X-Powered-By"})
 
-    # Check meta generator tag
-    gen_match = re.search(r'<meta[^>]+name=["\']generator["\'][^>]+content=["\']([^"\'>]+)', body)
-    if gen_match:
-        detected.append({"tech": gen_match.group(1), "category": "CMS", "source": "Meta: generator"})
+    # BeautifulSoup for meta generator
+    soup = BeautifulSoup(resp.text[:30000], "html.parser")
+    gen_tag = soup.find("meta", attrs={"name": "generator"})
+    if gen_tag and gen_tag.get("content"):
+        detected.append({"tech": gen_tag["content"], "category": "CMS", "source": "Meta: generator"})
 
-    # Check body and headers against known patterns
-    search_text = body + raw_headers
+    search_text = (resp.text[:30000] + str(resp.headers)).lower()
     seen = set()
-    for pattern, tech_name, category in _TECH_PATTERNS:
+    for pattern, tech_name, category in TECH_PATTERNS:
         if pattern.lower() in search_text and tech_name not in seen:
             seen.add(tech_name)
             detected.append({"tech": tech_name, "category": category, "source": "HTML/Headers"})
 
-    # Display results
     print()
     if detected:
         hdr = [("Tecnologia", 22), ("Categoria", 16), ("Fonte", 18)]
@@ -1864,182 +1507,95 @@ def run_tech_fingerprint(target, timeout=10):
             rows.append([f"{C.CY}{C.BLD}{t}{C.RST}", d["category"], f"{C.DIM}{d['source']}{C.RST}"])
         draw_table(hdr, rows)
         print()
-        draw_box([
-            f"  {C.CY}{C.BLD}{len(detected)} tecnologia(s) identificada(s){C.RST}",
-        ], width=w, title=f"{C.CY}{C.BLD}RESULTADO{C.RST}")
+        draw_box([f"  {C.CY}{C.BLD}{len(detected)} tecnologia(s) identificada(s){C.RST}"],
+                 width=w, title=f"{C.CY}{C.BLD}RESULTADO{C.RST}")
     else:
-        draw_box([
-            f"  {C.G}Nenhuma tecnologia identificada.{C.RST}",
-        ], width=w, title=f"{C.G}{C.BLD}RESULTADO{C.RST}", bc=C.G)
-
+        draw_box([f"  {C.G}Nenhuma tecnologia identificada.{C.RST}"],
+                 width=w, title=f"{C.G}{C.BLD}RESULTADO{C.RST}", bc=C.G)
     return detected
 
 
 # ─────────────────────────────────────────────────────
-#  Module 12: File Malware Scanner (VirusTotal)
+#  Module 12: File Malware Scanner (VirusTotal) — sync
 # ─────────────────────────────────────────────────────
 
 def _calculate_sha256(filepath, chunk_size=65536):
-    """Calculate SHA-256 hash of a file using chunked reads."""
-    sha256 = hashlib.sha256()
+    sha = hashlib.sha256()
     with open(filepath, "rb") as f:
         while True:
             data = f.read(chunk_size)
             if not data:
                 break
-            sha256.update(data)
-    return sha256.hexdigest()
-
-
-def _prompt_file_path():
-    """Ask the user for a local file path with validation."""
-    w = get_panel_width()
-    while True:
-        print()
-        try:
-            path = input(f"  {C.CY}▸ Caminho do ficheiro{C.RST} {C.DIM}(ou 'v' para voltar):{C.RST} ").strip()
-        except (KeyboardInterrupt, EOFError):
-            return None
-
-        if path.lower() == "v":
-            return None
-
-        # Remove surrounding quotes if any
-        path = path.strip('"').strip("'")
-
-        if not os.path.isfile(path):
-            draw_box([
-                f"  {C.R}Ficheiro nao encontrado:{C.RST}",
-                f"  {C.DIM}{path}{C.RST}",
-            ], width=w, title=f"{C.R}{C.BLD}ERRO{C.RST}", bc=C.R)
-            continue
-
-        return path
+            sha.update(data)
+    return sha.hexdigest()
 
 
 def run_file_scanner():
-    """Scan a local file for malware using VirusTotal API."""
+    """Scan a local file for malware using VirusTotal API (sync — no target needed)."""
+    import urllib.request
     w = get_panel_width()
     clear_screen()
     print(BANNER_MINI)
     draw_box([
         f"  {C.W}{C.BLD}Scanner de Malware via VirusTotal{C.RST}",
-        f"  {C.DIM}Calcula o SHA-256 do ficheiro e consulta{C.RST}",
-        f"  {C.DIM}a base de dados do VirusTotal (API v3).{C.RST}",
+        f"  {C.DIM}Calcula o SHA-256 e consulta a base do VirusTotal.{C.RST}",
     ], width=w, title=f"{C.CY}{C.BLD}FILE MALWARE SCANNER{C.RST}")
 
-    # Check API key
     if not VIRUSTOTAL_API_KEY:
         print()
         draw_box([
             f"  {C.R}{C.BLD}API Key do VirusTotal nao configurada!{C.RST}",
-            "",
-            f"  {C.W}Abra o ficheiro vulnrecon.py e insira sua{C.RST}",
-            f"  {C.W}chave na constante {C.BLD}VIRUSTOTAL_API_KEY{C.RST}",
-            "",
-            f"  {C.DIM}Obtenha gratis em: virustotal.com/gui/join-us{C.RST}",
+            f"  {C.DIM}Insira sua chave na constante VIRUSTOTAL_API_KEY{C.RST}",
         ], width=w, title=f"{C.R}{C.BLD}CONFIGURACAO{C.RST}", bc=C.R)
         return None
 
-    # Get file path from user
-    filepath = _prompt_file_path()
-    if filepath is None:
-        return None
-
-    filename = os.path.basename(filepath)
-    filesize = os.path.getsize(filepath)
-
-    # Format file size
-    if filesize >= 1_073_741_824:
-        size_str = f"{filesize / 1_073_741_824:.2f} GB"
-    elif filesize >= 1_048_576:
-        size_str = f"{filesize / 1_048_576:.2f} MB"
-    elif filesize >= 1024:
-        size_str = f"{filesize / 1024:.2f} KB"
-    else:
-        size_str = f"{filesize} bytes"
-
     print()
-    draw_box([
-        f"  {C.W}Ficheiro: {C.BLD}{filename}{C.RST}",
-        f"  {C.W}Tamanho:  {C.BLD}{size_str}{C.RST}",
-        f"  {C.DIM}{filepath}{C.RST}",
-    ], width=w, title=f"{C.CY}{C.BLD}FICHEIRO SELECIONADO{C.RST}")
-
-    # Step 1: Calculate SHA-256
-    print()
-    sp = Spinner("Calculando SHA-256 (chunked)...")
-    sp.start()
-    t0 = time.time()
     try:
-        file_hash = _calculate_sha256(filepath)
-    except (IOError, OSError, PermissionError) as e:
-        sp.stop()
-        draw_box([
-            f"  {C.R}Erro ao ler ficheiro: {e}{C.RST}",
-        ], width=w, title=f"{C.R}{C.BLD}ERRO{C.RST}", bc=C.R)
+        path = input(f"  {C.CY}▸ Caminho do ficheiro{C.RST} {C.DIM}(ou 'v' para voltar):{C.RST} ").strip().strip('"').strip("'")
+    except (KeyboardInterrupt, EOFError):
         return None
-    elapsed = time.time() - t0
-    sp.stop(f"Hash calculado em {elapsed:.2f}s")
+    if path.lower() == "v" or not os.path.isfile(path):
+        return None
+
+    filename = os.path.basename(path)
+    filesize = os.path.getsize(path)
+    size_str = f"{filesize / 1_048_576:.2f} MB" if filesize >= 1_048_576 else f"{filesize / 1024:.2f} KB" if filesize >= 1024 else f"{filesize} bytes"
 
     print()
-    draw_box([
-        f"  {C.W}SHA-256:{C.RST}",
-        f"  {C.G}{C.BLD}{file_hash}{C.RST}",
-    ], width=w, title=f"{C.CY}{C.BLD}HASH{C.RST}")
+    sp = Spinner("Calculando SHA-256...")
+    sp.start()
+    try:
+        file_hash = _calculate_sha256(path)
+    except (IOError, OSError) as e:
+        sp.stop()
+        draw_box([f"  {C.R}Erro ao ler ficheiro: {e}{C.RST}"], width=w, title=f"{C.R}{C.BLD}ERRO{C.RST}", bc=C.R)
+        return None
+    sp.stop(f"Hash: {file_hash[:16]}...")
 
-    # Step 2: Query VirusTotal API
     print()
     sp = Spinner("Consultando VirusTotal...")
     sp.start()
     vt_url = f"https://www.virustotal.com/api/v3/files/{file_hash}"
+    req = urllib.request.Request(vt_url, headers={"x-apikey": VIRUSTOTAL_API_KEY, "User-Agent": random.choice(USER_AGENTS)})
     try:
-        resp = requests.get(
-            vt_url, timeout=15,
-            headers={"x-apikey": VIRUSTOTAL_API_KEY, "User-Agent": _random_ua()}
-        )
-    except (Timeout, ConnectionError, RequestException) as e:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
         sp.stop()
-        draw_box([
-            f"  {C.R}Falha na conexao com VirusTotal: {e}{C.RST}",
-        ], width=w, title=f"{C.R}{C.BLD}ERRO{C.RST}", bc=C.R)
-        return None
-    sp.stop(f"Resposta: HTTP {resp.status_code}")
-
-    # Step 3: Parse response
-    print()
-    if resp.status_code == 404:
-        draw_box([
-            f"  {C.Y}{C.BLD}Hash nao encontrado na base do VirusTotal.{C.RST}",
-            "",
-            f"  {C.DIM}O ficheiro nunca foi submetido para analise.{C.RST}",
-            f"  {C.DIM}Isso nao significa que e seguro ou malicioso.{C.RST}",
-        ], width=w, title=f"{C.Y}{C.BLD}DESCONHECIDO{C.RST}", bc=C.Y)
+        if e.code == 404:
+            draw_box([f"  {C.Y}{C.BLD}Hash nao encontrado na base do VirusTotal.{C.RST}"],
+                     width=w, title=f"{C.Y}{C.BLD}DESCONHECIDO{C.RST}", bc=C.Y)
+        else:
+            draw_box([f"  {C.R}Erro HTTP {e.code}{C.RST}"], width=w, title=f"{C.R}{C.BLD}ERRO{C.RST}", bc=C.R)
         return {"hash": file_hash, "status": "unknown", "file": filename}
-
-    if resp.status_code == 401:
-        draw_box([
-            f"  {C.R}{C.BLD}API Key invalida ou expirada.{C.RST}",
-            f"  {C.DIM}Verifique a constante VIRUSTOTAL_API_KEY.{C.RST}",
-        ], width=w, title=f"{C.R}{C.BLD}ERRO DE AUTH{C.RST}", bc=C.R)
+    except Exception as e:
+        sp.stop()
+        draw_box([f"  {C.R}Falha: {e}{C.RST}"], width=w, title=f"{C.R}{C.BLD}ERRO{C.RST}", bc=C.R)
         return None
+    sp.stop(f"Resposta recebida")
 
-    if resp.status_code != 200:
-        draw_box([
-            f"  {C.R}Erro inesperado: HTTP {resp.status_code}{C.RST}",
-        ], width=w, title=f"{C.R}{C.BLD}ERRO{C.RST}", bc=C.R)
-        return None
-
-    try:
-        data = resp.json()
-        attrs = data["data"]["attributes"]
-        stats = attrs.get("last_analysis_stats", {})
-    except (json.JSONDecodeError, KeyError):
-        draw_box([
-            f"  {C.R}Erro ao interpretar resposta do VirusTotal.{C.RST}",
-        ], width=w, title=f"{C.R}{C.BLD}ERRO{C.RST}", bc=C.R)
-        return None
-
+    attrs = data.get("data", {}).get("attributes", {})
+    stats = attrs.get("last_analysis_stats", {})
     malicious = stats.get("malicious", 0)
     suspicious = stats.get("suspicious", 0)
     harmless = stats.get("harmless", 0)
@@ -2047,222 +1603,173 @@ def run_file_scanner():
     total_engines = malicious + suspicious + harmless + undetected
     threats = malicious + suspicious
 
-    # Results table
-    hdr = [("Metrica", 24), ("Valor", 12)]
-    rows = [
-        [f"{C.R}Malicioso{C.RST}", f"{C.R}{C.BLD}{malicious}{C.RST}"],
-        [f"{C.Y}Suspeito{C.RST}", f"{C.Y}{C.BLD}{suspicious}{C.RST}"],
-        [f"{C.G}Limpo{C.RST}", f"{C.G}{C.BLD}{harmless}{C.RST}"],
-        [f"{C.DIM}Nao detetado{C.RST}", f"{C.DIM}{undetected}{C.RST}"],
-        ["", ""],
-        [f"{C.W}{C.BLD}Total de motores{C.RST}", f"{C.W}{C.BLD}{total_engines}{C.RST}"],
-    ]
-    draw_table(hdr, rows)
-
-    # Verdict
     print()
     if threats == 0:
-        draw_box([
-            f"  {C.G}{C.BLD}FICHEIRO LIMPO{C.RST}",
-            "",
-            f"  {C.G}0/{total_engines} motores detetaram ameacas.{C.RST}",
-            f"  {C.DIM}Nenhuma deteção de malware registrada.{C.RST}",
-        ], width=w, title=f"{C.G}{C.BLD}VEREDICTO{C.RST}", bc=C.G)
+        draw_box([f"  {C.G}{C.BLD}FICHEIRO LIMPO — 0/{total_engines} ameacas.{C.RST}"],
+                 width=w, title=f"{C.G}{C.BLD}VEREDICTO{C.RST}", bc=C.G)
     elif threats <= 3:
-        draw_box([
-            f"  {C.Y}{C.BLD}FICHEIRO SUSPEITO{C.RST}",
-            "",
-            f"  {C.Y}{threats}/{total_engines} motores detetaram ameacas.{C.RST}",
-            f"  {C.DIM}Pode ser um falso positivo, mas tenha cuidado.{C.RST}",
-        ], width=w, title=f"{C.Y}{C.BLD}VEREDICTO{C.RST}", bc=C.Y)
+        draw_box([f"  {C.Y}{C.BLD}FICHEIRO SUSPEITO — {threats}/{total_engines} ameacas.{C.RST}"],
+                 width=w, title=f"{C.Y}{C.BLD}VEREDICTO{C.RST}", bc=C.Y)
     else:
-        popular_threat = attrs.get("popular_threat_classification", {})
-        threat_label = popular_threat.get("suggested_threat_label", "Desconhecido")
-        draw_box([
-            f"  {C.R}{C.BLD}MALWARE DETETADO!{C.RST}",
-            "",
-            f"  {C.R}{threats}/{total_engines} motores detetaram ameacas!{C.RST}",
-            f"  {C.W}Classificacao: {C.R}{C.BLD}{threat_label}{C.RST}",
-            "",
-            f"  {C.Y}NAO execute este ficheiro!{C.RST}",
-        ], width=w, title=f"{C.R}{C.BLD}VEREDICTO{C.RST}", bc=C.R)
+        draw_box([f"  {C.R}{C.BLD}MALWARE DETETADO! — {threats}/{total_engines} ameacas!{C.RST}"],
+                 width=w, title=f"{C.R}{C.BLD}VEREDICTO{C.RST}", bc=C.R)
+    return {"hash": file_hash, "file": filename, "threats": threats, "total_engines": total_engines}
 
-    return {
-        "hash": file_hash, "file": filename, "size": filesize,
-        "malicious": malicious, "suspicious": suspicious,
-        "harmless": harmless, "undetected": undetected,
-        "threats": threats, "total_engines": total_engines,
+
+# ─────────────────────────────────────────────────────
+#  Report Export: JSON
+# ─────────────────────────────────────────────────────
+
+def export_report(target, results_dict, output_path="report_vulnrecon.json"):
+    w = get_panel_width()
+    report = {
+        "tool": "VulnRecon", "version": "4.0",
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "target": {"hostname": target["hostname"], "ip": target["ip"], "url": target["url"]},
+        "results": {},
     }
+    for module_name, data in results_dict.items():
+        try:
+            json.dumps(data)
+            report["results"][module_name] = data
+        except (TypeError, ValueError):
+            report["results"][module_name] = str(data)
+    try:
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(report, f, indent=2, ensure_ascii=False)
+        draw_box([
+            f"  {C.G}{C.BLD}Relatorio JSON exportado!{C.RST}",
+            f"  {C.W}Arquivo: {C.BLD}{output_path}{C.RST}",
+        ], width=w, title=f"{C.G}{C.BLD}EXPORTACAO{C.RST}", bc=C.G)
+    except (IOError, OSError) as e:
+        draw_box([f"  {C.R}Falha ao salvar: {e}{C.RST}"], width=w, title=f"{C.R}{C.BLD}ERRO{C.RST}", bc=C.R)
 
 
 # ─────────────────────────────────────────────────────
-#  Full Audit
+#  Report Export: HTML (Enterprise)
 # ─────────────────────────────────────────────────────
 
-def _pause_and_clear():
-    """Pause for user input and clear screen."""
-    print()
-    input(f"  {C.DIM}Pressione Enter para continuar...{C.RST}")
-    clear_screen()
+def export_html_report(target, results_dict, output_path="report_vulnrecon.html"):
+    w = get_panel_width()
+    ts = time.strftime("%Y-%m-%d %H:%M:%S")
+    findings_summary = []
+    total_critical = 0
+
+    for mod, data in results_dict.items():
+        count = 0
+        severity = "BAIXO"
+        if isinstance(data, list):
+            count = len(data)
+            if mod in ("waf",) and count > 0:
+                severity = "MEDIO"
+            elif mod in ("cves", "error_db") and count > 0:
+                severity = "ALTO"
+            elif mod == "cloud_buckets":
+                pub = sum(1 for r in data if isinstance(r, dict) and r.get("public"))
+                if pub > 0:
+                    severity = "CRITICO"
+                    total_critical += pub
+        elif isinstance(data, dict):
+            if mod == "headers":
+                missing = len(data.get("missing", []))
+                count = missing
+                severity = "ALTO" if missing >= 4 else "MEDIO" if missing >= 2 else "BAIXO"
+            elif mod == "surface":
+                count = data.get("total", 0)
+                severity = "ALTO" if count >= 5 else "MEDIO" if count >= 1 else "BAIXO"
+        findings_summary.append({"module": mod, "count": count, "severity": severity})
+        if severity in ("ALTO", "CRITICO"):
+            total_critical += 1
+
+    sev_colors = {"CRITICO": "#e74c3c", "ALTO": "#e67e22", "MEDIO": "#f1c40f", "BAIXO": "#2ecc71"}
+
+    rows_html = ""
+    for f in findings_summary:
+        color = sev_colors.get(f["severity"], "#95a5a6")
+        rows_html += f'<tr><td>{html_mod.escape(f["module"])}</td><td>{f["count"]}</td><td style="color:{color};font-weight:bold">{f["severity"]}</td></tr>\n'
+
+    html_content = f"""<!DOCTYPE html>
+<html lang="pt-BR"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>VulnRecon Report — {html_mod.escape(target['hostname'])}</title>
+<style>
+*{{margin:0;padding:0;box-sizing:border-box}}body{{font-family:'Segoe UI',system-ui,sans-serif;background:#0d1117;color:#c9d1d9;padding:2rem}}
+.container{{max-width:900px;margin:0 auto}}.header{{text-align:center;border-bottom:1px solid #30363d;padding-bottom:1.5rem;margin-bottom:2rem}}
+h1{{color:#58a6ff;font-size:2rem}}h2{{color:#79c0ff;margin:1.5rem 0 0.75rem;font-size:1.2rem}}
+.meta{{color:#8b949e;font-size:0.9rem;margin-top:0.5rem}}
+table{{width:100%;border-collapse:collapse;margin:1rem 0}}th,td{{padding:0.6rem 1rem;text-align:left;border-bottom:1px solid #21262d}}
+th{{background:#161b22;color:#58a6ff;font-weight:600}}tr:hover{{background:#161b22}}
+.risk-badge{{display:inline-block;padding:0.3rem 0.8rem;border-radius:4px;font-weight:bold;font-size:0.85rem}}
+.footer{{text-align:center;color:#484f58;margin-top:3rem;padding-top:1rem;border-top:1px solid #21262d;font-size:0.8rem}}
+</style></head><body><div class="container">
+<div class="header"><h1>🛡️ VulnRecon v4.0 — Relatorio de Auditoria</h1>
+<p class="meta">Alvo: <strong>{html_mod.escape(target['hostname'])}</strong> ({html_mod.escape(target['ip'])}) | Gerado em: {ts}</p></div>
+<h2>Matriz de Risco</h2>
+<table><thead><tr><th>Modulo</th><th>Achados</th><th>Severidade</th></tr></thead><tbody>{rows_html}</tbody></table>
+<div class="footer">Gerado automaticamente por VulnRecon v4.0 Enterprise. Use somente com autorizacao.</div>
+</div></body></html>"""
+
+    try:
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write(html_content)
+        draw_box([
+            f"  {C.G}{C.BLD}Relatorio HTML exportado!{C.RST}",
+            f"  {C.W}Arquivo: {C.BLD}{output_path}{C.RST}",
+        ], width=w, title=f"{C.G}{C.BLD}EXPORTACAO HTML{C.RST}", bc=C.G)
+    except (IOError, OSError) as e:
+        draw_box([f"  {C.R}Falha ao salvar HTML: {e}{C.RST}"], width=w, title=f"{C.R}{C.BLD}ERRO{C.RST}", bc=C.R)
+    return total_critical
 
 
-def run_full_audit(target):
-    """Run all modules sequentially with pauses, then export report."""
+# ─────────────────────────────────────────────────────
+#  Full Audit (Async)
+# ─────────────────────────────────────────────────────
+
+async def run_full_audit(target, http_client=None, timeout=5, concurrency=15):
     w = get_panel_width()
     all_results = {}
 
-    waf_res = run_waf_detector(target)
-    all_results["waf"] = waf_res
-    _pause_and_clear()
+    all_results["waf"] = await run_waf_detector(target, http_client, timeout)
+    all_results["ports"] = await run_port_scanner(target, http_client, timeout=1.5, concurrency=concurrency)
+    all_results["headers"] = await run_header_analysis(target, http_client, timeout)
+    all_results["directories"] = await run_directory_fuzzer(target, http_client, timeout, concurrency)
+    all_results["admin_panels"] = await run_admin_hunter(target, http_client, timeout, concurrency)
+    all_results["cves"] = await run_cve_scanner(target, http_client, timeout)
+    all_results["cloud_buckets"] = await run_cloud_checker(target, http_client, timeout, concurrency)
+    all_results["surface"] = await run_surface_mapper(target, http_client, timeout, concurrency)
+    all_results["error_db"] = await run_error_db_scanner(target, http_client, timeout)
 
-    port_res = run_port_scanner(target)
-    all_results["ports"] = port_res
-    _pause_and_clear()
-
-    hdr_res = run_header_analysis(target)
-    all_results["headers"] = hdr_res
-    _pause_and_clear()
-
-    fuzz_res = run_directory_fuzzer(target)
-    all_results["directories"] = fuzz_res
-    _pause_and_clear()
-
-    admin_res = run_admin_hunter(target)
-    all_results["admin_panels"] = admin_res
-    _pause_and_clear()
-
-    cve_res = run_cve_scanner(target)
-    all_results["cves"] = cve_res
-    _pause_and_clear()
-
-    cloud_res = run_cloud_checker(target)
-    all_results["cloud_buckets"] = cloud_res
-    _pause_and_clear()
-
-    surface_res = run_surface_mapper(target)
-    all_results["surface"] = surface_res
-    _pause_and_clear()
-
-    err_res = run_error_db_scanner(target)
-    all_results["error_db"] = err_res
-
-    # Summary
-    wf = len(waf_res)
-    op = len([r for r in port_res if r["is_open"]])
-    mh = len(hdr_res.get("missing", []))
-    ed = len([r for r in fuzz_res if r["hit"]])
-    ap = len([r for r in admin_res if r["found"]])
-    cv = len(cve_res)
-    pb = len([r for r in cloud_res if r.get("public")])
-    sf = surface_res.get("total", 0)
-    er = len(err_res)
-    total = wf + op + mh + ed + ap + cv + pb + sf + er
-
-    if total == 0:
-        risk, rc = "BAIXO", C.G
-    elif total < 5:
-        risk, rc = "MEDIO", C.Y
-    elif total < 10:
-        risk, rc = "ALTO", C.R
-    else:
-        risk, rc = "CRITICO", C.R
-
-    print()
-    draw_box([
-        f"  {C.W}{C.BLD}Alvo: {target['hostname']}{C.RST} ({target['ip']})",
-        "",
-        f"  {C.CY}WAFs detectados:     {C.R if wf else C.G}{C.BLD}{wf}{C.RST}",
-        f"  {C.CY}Portas abertas:      {C.R if op else C.G}{C.BLD}{op}{C.RST}",
-        f"  {C.CY}Headers ausentes:    {C.R if mh else C.G}{C.BLD}{mh}{C.RST}",
-        f"  {C.CY}Diretorios expostos: {C.R if ed else C.G}{C.BLD}{ed}{C.RST}",
-        f"  {C.CY}Paineis de admin:    {C.R if ap else C.G}{C.BLD}{ap}{C.RST}",
-        f"  {C.CY}CVEs encontradas:    {C.R if cv else C.G}{C.BLD}{cv}{C.RST}",
-        f"  {C.CY}Buckets publicos:    {C.R if pb else C.G}{C.BLD}{pb}{C.RST}",
-        f"  {C.CY}Superficie ataque:   {C.R if sf else C.G}{C.BLD}{sf}{C.RST}",
-        f"  {C.CY}Erros de BD:         {C.R if er else C.G}{C.BLD}{er}{C.RST}",
-        "",
-        f"  {C.W}Total de achados: {rc}{C.BLD}{total}{C.RST}",
-        f"  {C.W}Nivel de risco:   {rc}{C.BLD}{risk}{C.RST}",
-    ], width=w, title=f"{C.CY}{C.BLD}RESUMO DA AUDITORIA{C.RST}")
-
-    # Export JSON report
     print()
     export_report(target, all_results)
+    return all_results
 
 
 # ─────────────────────────────────────────────────────
-#  Help / About Page
+#  Help / About
 # ─────────────────────────────────────────────────────
 
 def show_help():
-    """Display help page with explanations in Portuguese."""
     w = get_panel_width()
     print(BANNER_MINI)
-
     draw_box([
-        f"  {C.CY}{C.BLD}VulnRecon{C.RST} e uma ferramenta de auditoria",
-        f"  de seguranca que roda no terminal.",
-        f"  Identifica vulnerabilidades em servidores.",
-    ], width=w, title=f"{C.CY}{C.BLD}O QUE E?{C.RST}")
-
-    print()
-    draw_box([
-        f"  {C.W}{C.BLD}[1] Scanner de Portas{C.RST}",
-        f"  {C.DIM}Testa conexoes TCP em 20 portas criticas.{C.RST}",
-        "",
-        f"  {C.W}{C.BLD}[2] Cabecalhos de Seguranca{C.RST}",
-        f"  {C.DIM}Analisa 7 headers HTTP de protecao.{C.RST}",
-        "",
-        f"  {C.W}{C.BLD}[3] Caca-Diretorios{C.RST}",
-        f"  {C.DIM}Fuzzing em rotas sensiveis.{C.RST}",
-        "",
-        f"  {C.W}{C.BLD}[4] Caca-Paineis de Admin{C.RST}",
-        f"  {C.DIM}Busca paineis + fingerprint de CMS.{C.RST}",
-        "",
-        f"  {C.W}{C.BLD}[5] Scanner de CVEs{C.RST}",
-        f"  {C.DIM}Consulta CVEs via API do NIST NVD.{C.RST}",
-        "",
-        f"  {C.W}{C.BLD}[6] Verificador de Buckets{C.RST}",
-        f"  {C.DIM}Checa buckets S3, Azure, GCS expostos.{C.RST}",
-        "",
-        f"  {C.W}{C.BLD}[7] Detetor de WAF{C.RST}",
-        f"  {C.DIM}Analisa firewalls de aplicacao web.{C.RST}",
-        "",
-        f"  {C.W}{C.BLD}[8] Scanner de Erros de BD{C.RST}",
-        f"  {C.DIM}Detecta divulgacao de erros de banco de dados.{C.RST}",
-        "",
-        f"  {C.W}{C.BLD}[9] Mapeador de Superficie de Ataque{C.RST}",
-        f"  {C.DIM}Paineis de BD, parametros e erros expostos.{C.RST}",
-        "",
-        f"  {C.W}{C.BLD}[10] Scanner de Malware (Local){C.RST}",
-        f"  {C.DIM}Analisa ficheiros via SHA-256 + VirusTotal.{C.RST}",
-        "",
-        f"  {C.W}{C.BLD}[11] Enumeracao de Subdominios{C.RST}",
-        f"  {C.DIM}OSINT passivo via crt.sh (Certificate Transparency).{C.RST}",
-        "",
-        f"  {C.W}{C.BLD}[12] Fingerprinting de Tecnologias{C.RST}",
-        f"  {C.DIM}Identifica CMS, frameworks e servidores.{C.RST}",
-    ], width=w, title=f"{C.CY}{C.BLD}MODULOS{C.RST}")
-
+        f"  {C.CY}{C.BLD}VulnRecon v4.0 Enterprise{C.RST}",
+        f"  {C.DIM}Ferramenta de auditoria de seguranca async.{C.RST}",
+    ], width=w, title=f"{C.CY}{C.BLD}SOBRE{C.RST}")
     print()
     draw_box([
         f"  {C.W}{C.BLD}Modo Headless (CLI):{C.RST}",
         f"  {C.DIM}python vulnrecon.py alvo.com --all{C.RST}",
         f"  {C.DIM}python vulnrecon.py alvo.com --ports --headers{C.RST}",
-        f"  {C.DIM}python vulnrecon.py alvo.com --export relatorio.json{C.RST}",
-        f"  {C.DIM}Use --help para ver todas as flags.{C.RST}",
+        f"  {C.DIM}python vulnrecon.py alvo.com --all --export r.json{C.RST}",
+        f"  {C.DIM}python vulnrecon.py alvo.com --all --export-html r.html{C.RST}",
+        f"  {C.DIM}python vulnrecon.py alvo.com --all --ci{C.RST}",
+        f"  {C.DIM}python vulnrecon.py alvo.com --all --proxy-list p.txt{C.RST}",
+        f"  {C.DIM}python vulnrecon.py alvo.com --all --cookie 'sess=x'{C.RST}",
     ], width=w, title=f"{C.CY}{C.BLD}USO VIA TERMINAL{C.RST}")
-
     print()
     draw_box([
         f"  {C.R}{C.BLD}AVISO LEGAL{C.RST}",
-        "",
         f"  {C.W}Use SOMENTE em alvos com autorizacao.{C.RST}",
-        f"  {C.W}Para testes, use:{C.RST}",
         f"  {C.G}{C.BLD}scanme.nmap.org{C.RST} {C.DIM}(autorizado pelo Nmap){C.RST}",
-        "",
-        f"  {C.DIM}Escanear sem permissao e ILEGAL e pode{C.RST}",
-        f"  {C.DIM}resultar em consequencias juridicas.{C.RST}",
     ], width=w, title=f"{C.R}{C.BLD}USO LEGAL{C.RST}", bc=C.R)
 
 
@@ -2271,99 +1778,126 @@ def show_help():
 # ─────────────────────────────────────────────────────
 
 def show_menu():
-    """Display the main interactive menu."""
     w = get_panel_width()
     draw_box([
         f"  {C.CY}{C.BLD}[1]{C.RST}  {C.W}{C.BLD}Auditoria Completa{C.RST}",
         f"       {C.DIM}Todos os modulos + relatorio JSON{C.RST}",
         "",
         f"  {C.CY}{C.BLD}[2]{C.RST}  {C.W}{C.BLD}Escanear Portas{C.RST}",
-        f"       {C.DIM}Testa conexoes TCP nas portas criticas{C.RST}",
-        "",
         f"  {C.CY}{C.BLD}[3]{C.RST}  {C.W}{C.BLD}Verificar Cabecalhos HTTP{C.RST}",
-        f"       {C.DIM}Analisa headers de seguranca do servidor{C.RST}",
-        "",
         f"  {C.CY}{C.BLD}[4]{C.RST}  {C.W}{C.BLD}Cacar Diretorios Ocultos{C.RST}",
-        f"       {C.DIM}Fuzzing + calibracao soft-404{C.RST}",
-        "",
         f"  {C.CY}{C.BLD}[5]{C.RST}  {C.W}{C.BLD}Cacar Paineis de Admin{C.RST}",
-        f"       {C.DIM}Detecta paineis + fingerprint de CMS{C.RST}",
-        "",
         f"  {C.CY}{C.BLD}[6]{C.RST}  {C.W}{C.BLD}Scanner de CVEs{C.RST}",
-        f"       {C.DIM}Consulta vulnerabilidades publicas (NVD){C.RST}",
-        "",
-        f"  {C.CY}{C.BLD}[7]{C.RST}  {C.W}{C.BLD}Verificador de Buckets na Nuvem{C.RST}",
-        f"       {C.DIM}Checa S3, Azure Blob, Google GCS{C.RST}",
-        "",
+        f"  {C.CY}{C.BLD}[7]{C.RST}  {C.W}{C.BLD}Verificador de Buckets{C.RST}",
         f"  {C.CY}{C.BLD}[8]{C.RST}  {C.W}{C.BLD}Detetor de WAF{C.RST}",
-        f"       {C.DIM}Identifica firewalls de aplicacao{C.RST}",
-        "",
         f"  {C.CY}{C.BLD}[9]{C.RST}  {C.W}{C.BLD}Scanner de Erros de BD{C.RST}",
-        f"       {C.DIM}Detecta divulgacao de erros de BD{C.RST}",
-        "",
         f"  {C.CY}{C.BLD}[10]{C.RST} {C.W}{C.BLD}Mapeador de Superficie{C.RST}",
-        f"       {C.DIM}Paineis de BD + parametros + erros{C.RST}",
-        "",
         f"  {C.CY}{C.BLD}[11]{C.RST} {C.W}{C.BLD}Scanner de Malware (Local){C.RST}",
-        f"       {C.DIM}Analisa ficheiros via VirusTotal{C.RST}",
-        "",
         f"  {C.CY}{C.BLD}[12]{C.RST} {C.W}{C.BLD}Enumeracao de Subdominios{C.RST}",
-        f"       {C.DIM}OSINT passivo via crt.sh{C.RST}",
-        "",
         f"  {C.CY}{C.BLD}[13]{C.RST} {C.W}{C.BLD}Fingerprinting de Tecnologias{C.RST}",
-        f"       {C.DIM}Identifica CMS, frameworks e servidores{C.RST}",
-        "",
         f"  {C.CY}{C.BLD}[14]{C.RST} {C.W}{C.BLD}Ajuda / Sobre{C.RST}",
-        f"       {C.DIM}Conceitos e uso legal{C.RST}",
         "",
         f"  {C.R}{C.BLD}[0]{C.RST}  {C.DIM}Sair{C.RST}",
     ], width=w, title=f"{C.CY}{C.BLD}MENU PRINCIPAL{C.RST}")
 
 
-def run_scan_module(choice, target):
-    """Execute the selected scan module."""
-    clear_screen()
+SCAN_MAP = {
+    "1": "full", "2": "ports", "3": "headers", "4": "fuzz",
+    "5": "admin", "6": "cves", "7": "buckets", "8": "waf",
+    "9": "errors", "10": "surface", "12": "subdomains", "13": "tech",
+}
+
+
+async def run_scan_module(choice, target):
+    client = AsyncHttpClient()
     if choice == "1":
-        run_full_audit(target)
+        await run_full_audit(target, client)
     elif choice == "2":
-        run_port_scanner(target)
+        await run_port_scanner(target, client)
     elif choice == "3":
-        run_header_analysis(target)
+        await run_header_analysis(target, client)
     elif choice == "4":
-        run_directory_fuzzer(target)
+        await run_directory_fuzzer(target, client)
     elif choice == "5":
-        run_admin_hunter(target)
+        await run_admin_hunter(target, client)
     elif choice == "6":
-        run_cve_scanner(target)
+        await run_cve_scanner(target, client)
     elif choice == "7":
-        run_cloud_checker(target)
+        await run_cloud_checker(target, client)
     elif choice == "8":
-        run_waf_detector(target)
+        await run_waf_detector(target, client)
     elif choice == "9":
-        run_error_db_scanner(target)
+        await run_error_db_scanner(target, client)
     elif choice == "10":
-        run_surface_mapper(target)
+        await run_surface_mapper(target, client)
     elif choice == "12":
-        run_subdomain_enum(target)
+        await run_subdomain_enum(target, client)
     elif choice == "13":
-        run_tech_fingerprint(target)
+        await run_tech_fingerprint(target, client)
+
+
+def run_interactive():
+    while True:
+        clear_screen()
+        print(BANNER)
+        show_menu()
+        print()
+        try:
+            choice = input(f"  {C.CY}▸ Escolha uma opcao:{C.RST} ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print(f"\n\n  {C.DIM}Ate logo!{C.RST}\n")
+            break
+        if choice == "0":
+            clear_screen()
+            print(BANNER)
+            draw_box([
+                f"  {C.G}Obrigado por usar o VulnRecon!{C.RST}",
+                f"  {C.DIM}Fique seguro. Hackeie com responsabilidade.{C.RST}",
+            ], width=get_panel_width(), title=f"{C.G}{C.BLD}ATE LOGO{C.RST}", bc=C.G)
+            print()
+            break
+        elif choice == "11":
+            clear_screen()
+            run_file_scanner()
+            print()
+            input(f"  {C.DIM}Pressione Enter para voltar ao menu...{C.RST}")
+            continue
+        elif choice == "14":
+            clear_screen()
+            show_help()
+            print()
+            input(f"  {C.DIM}Pressione Enter para voltar ao menu...{C.RST}")
+            continue
+        elif choice in SCAN_MAP:
+            clear_screen()
+            print(BANNER_MINI)
+            target = prompt_target()
+            if target is None:
+                continue
+            print()
+            input(f"  {C.DIM}Pressione Enter para iniciar o scan...{C.RST}")
+            clear_screen()
+            asyncio.run(run_scan_module(choice, target))
+            print()
+            input(f"  {C.DIM}Pressione Enter para voltar ao menu...{C.RST}")
+        else:
+            draw_box([f"  {C.R}Opcao '{choice}' invalida.{C.RST}"],
+                     width=get_panel_width(), title=f"{C.R}{C.BLD}ERRO{C.RST}", bc=C.R)
+            time.sleep(1.5)
 
 
 # ─────────────────────────────────────────────────────
-#  Argparse (Headless CLI Mode)
+#  Argparse (Headless CLI Mode) — Enterprise Flags
 # ─────────────────────────────────────────────────────
 
 def build_parser():
-    """Build the argparse parser for headless CLI mode."""
     parser = argparse.ArgumentParser(
         prog="vulnrecon",
-        description="VulnRecon — Ferramenta de Auditoria de Seguranca CLI",
-        epilog="Exemplo: python vulnrecon.py scanme.nmap.org --all --export relatorio.json",
+        description="VulnRecon v4.0 — Ferramenta Enterprise de Auditoria de Seguranca",
+        epilog="Exemplo: python vulnrecon.py scanme.nmap.org --all --export-html relatorio.html --ci",
     )
-    parser.add_argument("target", nargs="?", default=None,
-                        help="URL ou IP do alvo (ex: scanme.nmap.org)")
+    parser.add_argument("target", nargs="?", default=None, help="URL ou IP do alvo")
 
-    # Scan module flags
     scan = parser.add_argument_group("Modulos de Scan")
     scan.add_argument("--all", action="store_true", help="Executa todos os modulos")
     scan.add_argument("--ports", action="store_true", help="Scanner de portas TCP")
@@ -2374,31 +1908,33 @@ def build_parser():
     scan.add_argument("--buckets", action="store_true", help="Verificador de cloud buckets")
     scan.add_argument("--waf", action="store_true", help="Detetor de WAF")
     scan.add_argument("--errors", action="store_true", help="Scanner de erros de BD")
-    scan.add_argument("--surface", action="store_true", help="Mapeador de superficie de ataque")
-    scan.add_argument("--subdomains", action="store_true", help="Enumeracao de subdominios (crt.sh)")
+    scan.add_argument("--surface", action="store_true", help="Mapeador de superficie")
+    scan.add_argument("--subdomains", action="store_true", help="Enumeracao de subdominios")
     scan.add_argument("--tech", action="store_true", help="Fingerprinting de tecnologias")
 
-    # Configuration flags
     config = parser.add_argument_group("Configuracao")
-    config.add_argument("--threads", type=int, default=10, help="Numero de threads (default: 10)")
+    config.add_argument("--threads", type=int, default=15, help="Concorrencia async (default: 15)")
     config.add_argument("--timeout", type=int, default=5, help="Timeout em segundos (default: 5)")
-    config.add_argument("--delay", type=float, default=None, help="Delay entre requests em segundos")
-    config.add_argument("--wordlist", type=str, default=None, help="Wordlist externa para fuzzing (.txt)")
-    config.add_argument("--export", type=str, default=None, help="Exportar relatorio JSON (ex: report.json)")
+    config.add_argument("--delay", type=float, default=None, help="Delay base entre requests")
+    config.add_argument("--wordlist", type=str, default=None, help="Wordlist externa para fuzzing")
+    config.add_argument("--export", type=str, default=None, help="Exportar relatorio JSON")
+    config.add_argument("--export-html", type=str, default=None, dest="export_html", help="Exportar relatorio HTML")
+
+    enterprise = parser.add_argument_group("Enterprise")
+    enterprise.add_argument("--proxy-list", type=str, default=None, dest="proxy_list", help="Arquivo com lista de proxies")
+    enterprise.add_argument("--cookie", type=str, default=None, help="Cookie header para scan autenticado")
+    enterprise.add_argument("--token", type=str, default=None, help="Authorization Bearer token")
+    enterprise.add_argument("--ci", action="store_true", help="Modo CI/CD: exit(1) se achados criticos")
 
     return parser
 
 
-def run_headless(args):
-    """Run VulnRecon in headless (CLI) mode based on argparse flags."""
+async def run_headless(args):
     global THROTTLE_DELAY
     setup_console()
-
-    # Apply delay if specified
     if args.delay is not None:
         THROTTLE_DELAY = args.delay
 
-    # Resolve target
     print(BANNER_MINI)
     target = resolve_target(args.target)
     if target is None:
@@ -2408,144 +1944,88 @@ def run_headless(args):
     draw_box([
         f"  {C.W}Alvo: {C.BLD}{target['url']}{C.RST}",
         f"  {C.W}IP:   {C.BLD}{target['ip']}{C.RST}",
-        f"  {C.DIM}Threads: {args.threads} | Timeout: {args.timeout}s{C.RST}",
+        f"  {C.DIM}Concorrencia: {args.threads} | Timeout: {args.timeout}s{C.RST}",
     ], width=get_panel_width(), title=f"{C.CY}{C.BLD}VULNRECON HEADLESS{C.RST}")
 
+    client = AsyncHttpClient(
+        timeout=args.timeout, delay=THROTTLE_DELAY,
+        proxy_list=args.proxy_list, cookie=args.cookie, token=args.token
+    )
     all_results = {}
     run_all = args.all
 
     if run_all or args.waf:
         print()
-        res = run_waf_detector(target, timeout=args.timeout)
-        all_results["waf"] = res
-
+        all_results["waf"] = await run_waf_detector(target, client, args.timeout)
     if run_all or args.ports:
         print()
-        res = run_port_scanner(target, timeout=args.timeout, threads=args.threads)
-        all_results["ports"] = res
-
+        all_results["ports"] = await run_port_scanner(target, client, timeout=args.timeout, concurrency=args.threads)
     if run_all or args.headers:
         print()
-        res = run_header_analysis(target, timeout=args.timeout)
-        all_results["headers"] = res
-
+        all_results["headers"] = await run_header_analysis(target, client, args.timeout)
     if run_all or args.fuzz:
         print()
-        res = run_directory_fuzzer(target, timeout=args.timeout, threads=args.threads,
-                                  wordlist_path=args.wordlist)
-        all_results["directories"] = res
-
+        all_results["directories"] = await run_directory_fuzzer(target, client, args.timeout, args.threads, args.wordlist)
     if run_all or args.admin:
         print()
-        res = run_admin_hunter(target, timeout=args.timeout, threads=args.threads)
-        all_results["admin_panels"] = res
-
+        all_results["admin_panels"] = await run_admin_hunter(target, client, args.timeout, args.threads)
     if run_all or args.cves:
         print()
-        res = run_cve_scanner(target, timeout=args.timeout)
-        all_results["cves"] = res
-
+        all_results["cves"] = await run_cve_scanner(target, client, args.timeout)
     if run_all or args.buckets:
         print()
-        res = run_cloud_checker(target, timeout=args.timeout, threads=args.threads)
-        all_results["cloud_buckets"] = res
-
+        all_results["cloud_buckets"] = await run_cloud_checker(target, client, args.timeout, args.threads)
     if run_all or args.surface:
         print()
-        res = run_surface_mapper(target, timeout=args.timeout)
-        all_results["surface"] = res
-
+        all_results["surface"] = await run_surface_mapper(target, client, args.timeout, args.threads)
     if run_all or args.errors:
         print()
-        res = run_error_db_scanner(target, timeout=args.timeout)
-        all_results["error_db"] = res
-
+        all_results["error_db"] = await run_error_db_scanner(target, client, args.timeout)
     if run_all or args.subdomains:
         print()
-        res = run_subdomain_enum(target, timeout=args.timeout)
-        all_results["subdomains"] = [s for s in res] if res else []
-
+        subs = await run_subdomain_enum(target, client, args.timeout)
+        all_results["subdomains"] = list(subs) if subs else []
     if run_all or args.tech:
         print()
-        res = run_tech_fingerprint(target, timeout=args.timeout)
-        all_results["technologies"] = res
+        all_results["technologies"] = await run_tech_fingerprint(target, client, args.timeout)
 
-    # Export report if --export flag is set
-    export_path = args.export
-    if export_path:
+    # Export reports
+    if args.export:
         print()
-        export_report(target, all_results, output_path=export_path)
+        export_report(target, all_results, output_path=args.export)
     elif run_all:
         print()
         export_report(target, all_results)
 
-    print()
-
-
-# ─────────────────────────────────────────────────────
-#  Interactive Mode
-# ─────────────────────────────────────────────────────
-
-def run_interactive():
-    """Main interactive menu loop."""
-    while True:
-        clear_screen()
-        print(BANNER)
-        show_menu()
+    critical_count = 0
+    if args.export_html:
         print()
+        critical_count = export_html_report(target, all_results, output_path=args.export_html)
 
-        try:
-            choice = input(f"  {C.CY}▸ Escolha uma opcao:{C.RST} ").strip()
-        except (KeyboardInterrupt, EOFError):
-            print(f"\n\n  {C.DIM}Ate logo!{C.RST}\n")
-            break
-
-        if choice == "0":
-            clear_screen()
-            print(BANNER)
+    # CI/CD: exit(1) on critical findings
+    if args.ci:
+        has_critical = critical_count > 0
+        # Also check individual modules
+        for mod, data in all_results.items():
+            if isinstance(data, list) and len(data) > 0:
+                if mod in ("cves", "error_db"):
+                    has_critical = True
+                elif mod == "cloud_buckets":
+                    if any(isinstance(r, dict) and r.get("public") for r in data):
+                        has_critical = True
+        if has_critical:
+            print()
             draw_box([
-                f"  {C.G}Obrigado por usar o VulnRecon!{C.RST}",
-                f"  {C.DIM}Fique seguro. Hackeie com responsabilidade.{C.RST}",
-            ], width=get_panel_width(), title=f"{C.G}{C.BLD}ATE LOGO{C.RST}", bc=C.G)
-            print()
-            break
-
-        elif choice == "11":
-            # File Malware Scanner — dedicated flow (no network target)
-            clear_screen()
-            run_file_scanner()
-            print()
-            input(f"  {C.DIM}Pressione Enter para voltar ao menu...{C.RST}")
-            continue
-
-        elif choice == "14":
-            clear_screen()
-            show_help()
-            print()
-            input(f"  {C.DIM}Pressione Enter para voltar ao menu...{C.RST}")
-            continue
-
-        elif choice in ("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "12", "13"):
-            clear_screen()
-            print(BANNER_MINI)
-            target = prompt_target()
-            if target is None:
-                continue
-            print()
-            input(f"  {C.DIM}Pressione Enter para iniciar o scan...{C.RST}")
-            run_scan_module(choice, target)
-            print()
-            input(f"  {C.DIM}Pressione Enter para voltar ao menu...{C.RST}")
-            continue
-
+                f"  {C.R}{C.BLD}CI/CD: Achados criticos detectados!{C.RST}",
+                f"  {C.Y}Saindo com exit code 1 para quebrar a pipeline.{C.RST}",
+            ], width=get_panel_width(), title=f"{C.R}{C.BLD}CI/CD MODE{C.RST}", bc=C.R)
+            sys.exit(1)
         else:
-            # Invalid input
             print()
-            draw_box([
-                f"  {C.R}Opcao '{choice}' invalida.{C.RST}",
-                f"  {C.DIM}Digite um numero de 0 a 14.{C.RST}",
-            ], width=get_panel_width(), title=f"{C.R}{C.BLD}ERRO{C.RST}", bc=C.R)
-            time.sleep(1.5)
+            draw_box([f"  {C.G}{C.BLD}CI/CD: Nenhum achado critico. Pipeline OK.{C.RST}"],
+                     width=get_panel_width(), title=f"{C.G}{C.BLD}CI/CD MODE{C.RST}", bc=C.G)
+
+    print()
 
 
 # ─────────────────────────────────────────────────────
@@ -2553,22 +2033,17 @@ def run_interactive():
 # ─────────────────────────────────────────────────────
 
 def main():
-    """Hybrid entry point: headless if CLI args provided, interactive otherwise."""
     setup_console()
-
     parser = build_parser()
-
-    # If no arguments at all → interactive mode
     if len(sys.argv) == 1:
         run_interactive()
     else:
         args = parser.parse_args()
         if args.target:
-            run_headless(args)
+            asyncio.run(run_headless(args))
         else:
             parser.print_help()
 
 
 if __name__ == "__main__":
     main()
-
