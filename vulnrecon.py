@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """
-VulnRecon — CLI Security Auditing Tool
-A lightweight vulnerability scanner for security auditing.
+VulnRecon — Interactive CLI Security Auditing Tool
+A polished, menu-driven vulnerability scanner with styled terminal UI.
 Modules: Port Scanner | HTTP Security Headers | Directory Fuzzer
 """
 
-import argparse
+import os
+import platform
+import re
 import socket
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse
@@ -16,653 +19,660 @@ try:
     import requests
     from requests.exceptions import ConnectionError, Timeout, RequestException
 except ImportError:
-    print("\n[!] Missing dependency: 'requests'")
-    print("    Install it with: pip install requests\n")
+    print("\n  [!] Dependencia ausente: 'requests'")
+    print("      Instale com: pip install requests\n")
     sys.exit(1)
 
 
-# ──────────────────────────────────────────────
-#  ANSI Color Codes & Styling
-# ──────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
+#  Console Setup
+# ─────────────────────────────────────────────────────
 
-class Colors:
-    """ANSI escape codes for terminal styling."""
-    RED     = "\033[91m"
-    GREEN   = "\033[92m"
-    YELLOW  = "\033[93m"
-    CYAN    = "\033[96m"
-    MAGENTA = "\033[95m"
-    WHITE   = "\033[97m"
-    BOLD    = "\033[1m"
-    DIM     = "\033[2m"
-    RESET   = "\033[0m"
-
-
-def print_colored(text: str, color: str = Colors.WHITE) -> None:
-    """Print a line with the specified ANSI color."""
-    print(f"{color}{text}{Colors.RESET}")
-
-
-def print_status(symbol: str, message: str, color: str) -> None:
-    """Print a formatted status line: [symbol] message."""
-    print(f"  {color}{Colors.BOLD}[{symbol}]{Colors.RESET} {color}{message}{Colors.RESET}")
-
-
-def print_section_header(title: str) -> None:
-    """Print a styled section header."""
-    width = 56
-    print()
-    print_colored("─" * width, Colors.DIM)
-    print_colored(f"  ▸ {title}", Colors.CYAN + Colors.BOLD)
-    print_colored("─" * width, Colors.DIM)
-
-
-# ──────────────────────────────────────────────
-#  ASCII Art Banner
-# ──────────────────────────────────────────────
-
-BANNER = f"""
-{Colors.CYAN}{Colors.BOLD}
- ██╗   ██╗██╗   ██╗██╗     ███╗   ██╗
- ██║   ██║██║   ██║██║     ████╗  ██║
- ██║   ██║██║   ██║██║     ██╔██╗ ██║
- ╚██╗ ██╔╝██║   ██║██║     ██║╚██╗██║
-  ╚████╔╝ ╚██████╔╝███████╗██║ ╚████║
-   ╚═══╝   ╚═════╝ ╚══════╝╚═╝  ╚═══╝
-         {Colors.WHITE}{Colors.BOLD}R  E  C  O  N{Colors.RESET}
-{Colors.DIM}  ──────────────────────────────────────
-{Colors.WHITE}   Security Auditing Tool  {Colors.DIM}v1.0.0
-   github.com/your-handle/vulnrecon
-  ──────────────────────────────────────{Colors.RESET}
-"""
-
-
-# ──────────────────────────────────────────────
-#  Target Resolution & Validation
-# ──────────────────────────────────────────────
-
-def resolve_target(raw_target: str) -> dict:
-    """
-    Parse and validate the user-provided target.
-    Returns a dict with 'hostname', 'ip', and 'url' keys.
-    """
-    raw_target = raw_target.strip()
-
-    # If no scheme is present, prepend http:// for urlparse to work
-    if not raw_target.startswith(("http://", "https://")):
-        url_for_parse = f"http://{raw_target}"
-    else:
-        url_for_parse = raw_target
-
-    parsed = urlparse(url_for_parse)
-    hostname = parsed.hostname
-
-    if not hostname:
-        return None
-
-    try:
-        ip_address = socket.gethostbyname(hostname)
-    except socket.gaierror:
-        return None
-
-    return {
-        "hostname": hostname,
-        "ip": ip_address,
-        "url": url_for_parse,
-    }
-
-
-# ──────────────────────────────────────────────
-#  Module 1: Port Scanner
-# ──────────────────────────────────────────────
-
-# Common ports with service descriptions
-COMMON_PORTS = {
-    21:    "FTP",
-    22:    "SSH",
-    23:    "Telnet",
-    25:    "SMTP",
-    53:    "DNS",
-    80:    "HTTP",
-    110:   "POP3",
-    143:   "IMAP",
-    443:   "HTTPS",
-    445:   "SMB",
-    993:   "IMAPS",
-    995:   "POP3S",
-    3306:  "MySQL",
-    3389:  "RDP",
-    5432:  "PostgreSQL",
-    5900:  "VNC",
-    6379:  "Redis",
-    8080:  "HTTP-Alt",
-    8443:  "HTTPS-Alt",
-    27017: "MongoDB",
-}
-
-
-def scan_single_port(ip: str, port: int, timeout: float) -> dict:
-    """
-    Attempt a TCP connection to a single port.
-    Returns a dict with 'port', 'service', and 'is_open'.
-    """
-    service = COMMON_PORTS.get(port, "Unknown")
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.settimeout(timeout)
-            result = sock.connect_ex((ip, port))
-            return {"port": port, "service": service, "is_open": result == 0}
-    except (socket.timeout, OSError):
-        return {"port": port, "service": service, "is_open": False}
-
-
-def run_port_scanner(target: dict, timeout: float = 1.5, threads: int = 20) -> list:
-    """
-    Scan all common ports using a thread pool for concurrency.
-    Returns a sorted list of result dicts.
-    """
-    print_section_header("PORT SCANNER")
-    print_colored(f"  Target: {target['hostname']} ({target['ip']})", Colors.WHITE)
-    print_colored(f"  Ports:  {len(COMMON_PORTS)} | Timeout: {timeout}s | Threads: {threads}", Colors.DIM)
-    print()
-
-    results = []
-    start_time = time.time()
-
-    with ThreadPoolExecutor(max_workers=threads) as executor:
-        futures = {
-            executor.submit(scan_single_port, target["ip"], port, timeout): port
-            for port in COMMON_PORTS
-        }
-        for future in as_completed(futures):
-            try:
-                result = future.result()
-                results.append(result)
-            except Exception:
-                port = futures[future]
-                results.append({"port": port, "service": COMMON_PORTS.get(port, "?"), "is_open": False})
-
-    elapsed = time.time() - start_time
-    results.sort(key=lambda r: r["port"])
-
-    open_ports = []
-    closed_ports = []
-
-    for r in results:
-        port_str = f"{r['port']}/tcp"
-        service_str = r["service"]
-        if r["is_open"]:
-            print_status("OPEN", f"{port_str:<12} {service_str}", Colors.RED)
-            open_ports.append(r)
-        else:
-            print_status("CLOSED", f"{port_str:<12} {service_str}", Colors.GREEN)
-            closed_ports.append(r)
-
-    print()
-    print_colored(f"  Scan completed in {elapsed:.2f}s", Colors.DIM)
-    print_colored(
-        f"  Results: {Colors.RED}{Colors.BOLD}{len(open_ports)} open{Colors.RESET}"
-        f"{Colors.DIM} · {Colors.GREEN}{len(closed_ports)} closed{Colors.RESET}",
-        ""
-    )
-
-    return results
-
-
-# ──────────────────────────────────────────────
-#  Module 2: HTTP Security Headers Analyzer
-# ──────────────────────────────────────────────
-
-SECURITY_HEADERS = {
-    "Strict-Transport-Security": {
-        "severity": "HIGH",
-        "description": "Enforces HTTPS connections, prevents SSL-stripping attacks.",
-    },
-    "X-Frame-Options": {
-        "severity": "MEDIUM",
-        "description": "Prevents clickjacking by disallowing iframe embedding.",
-    },
-    "X-Content-Type-Options": {
-        "severity": "MEDIUM",
-        "description": "Prevents MIME-type sniffing attacks.",
-    },
-    "Content-Security-Policy": {
-        "severity": "HIGH",
-        "description": "Controls resource loading, mitigates XSS and injection attacks.",
-    },
-    "X-XSS-Protection": {
-        "severity": "LOW",
-        "description": "Legacy XSS filter (deprecated but still recommended as fallback).",
-    },
-    "Referrer-Policy": {
-        "severity": "LOW",
-        "description": "Controls how much referrer info is sent with requests.",
-    },
-    "Permissions-Policy": {
-        "severity": "MEDIUM",
-        "description": "Restricts browser features like camera, microphone, geolocation.",
-    },
-}
-
-SEVERITY_COLORS = {
-    "HIGH": Colors.RED,
-    "MEDIUM": Colors.YELLOW,
-    "LOW": Colors.DIM,
-}
-
-
-def run_header_analysis(target: dict, timeout: float = 10) -> dict:
-    """
-    Fetch response headers from the target and check for
-    the presence of essential security headers.
-    Returns a dict with 'present' and 'missing' lists.
-    """
-    print_section_header("HTTP SECURITY HEADERS")
-
-    url = target["url"]
-    print_colored(f"  Target: {url}", Colors.WHITE)
-    print()
-
-    try:
-        response = requests.get(url, timeout=timeout, allow_redirects=True, verify=False)
-    except Timeout:
-        print_status("!", "Connection timed out. Skipping header analysis.", Colors.YELLOW)
-        return {"present": [], "missing": list(SECURITY_HEADERS.keys()), "error": True}
-    except ConnectionError:
-        print_status("!", "Connection refused. Skipping header analysis.", Colors.YELLOW)
-        return {"present": [], "missing": list(SECURITY_HEADERS.keys()), "error": True}
-    except RequestException as e:
-        print_status("!", f"Request failed: {e}", Colors.YELLOW)
-        return {"present": [], "missing": list(SECURITY_HEADERS.keys()), "error": True}
-
-    # Suppress urllib3 InsecureRequestWarning globally
+def setup_console():
+    """Configure console for UTF-8 output and ANSI escape code support."""
+    if platform.system() == "Windows":
+        os.system("chcp 65001 >nul 2>&1")
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            kernel32.SetConsoleMode(kernel32.GetStdHandle(-11), 7)
+        except Exception:
+            pass
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
     import urllib3
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-    print_colored(f"  HTTP {response.status_code} — {len(response.headers)} headers received", Colors.DIM)
-    print()
 
-    present = []
-    missing = []
+def clear_screen():
+    """Clear the terminal screen."""
+    os.system("cls" if platform.system() == "Windows" else "clear")
 
-    for header, info in SECURITY_HEADERS.items():
-        value = response.headers.get(header)
-        severity = info["severity"]
-        sev_color = SEVERITY_COLORS.get(severity, Colors.WHITE)
 
-        if value:
-            present.append(header)
-            truncated_value = (value[:50] + "…") if len(value) > 50 else value
-            print_status("✓", f"{header}", Colors.GREEN)
-            print_colored(f"        Value: {truncated_value}", Colors.DIM)
+def get_panel_width():
+    """Calculate optimal panel width based on terminal size."""
+    try:
+        cols = os.get_terminal_size().columns
+    except (ValueError, OSError):
+        cols = 80
+    return min(cols - 4, 68)
+
+
+# ─────────────────────────────────────────────────────
+#  ANSI Color Codes
+# ─────────────────────────────────────────────────────
+
+class C:
+    """Compact ANSI escape codes."""
+    R    = "\033[91m"
+    G    = "\033[92m"
+    Y    = "\033[93m"
+    M    = "\033[95m"
+    CY   = "\033[96m"
+    W    = "\033[97m"
+    BLD  = "\033[1m"
+    DIM  = "\033[2m"
+    RST  = "\033[0m"
+
+
+# ─────────────────────────────────────────────────────
+#  UI Drawing Utilities
+# ─────────────────────────────────────────────────────
+
+def _vlen(text):
+    """Visible length of text (strips ANSI codes)."""
+    return len(re.sub(r'\033\[[0-9;]*m', '', text))
+
+
+def draw_box(lines, width=60, title="", bc=None):
+    """Draw a Unicode-bordered box around content lines."""
+    if bc is None:
+        bc = C.CY
+    r = C.RST
+    iw = width - 2
+
+    if title:
+        tl = _vlen(title)
+        rpad = max(iw - tl - 4, 0)
+        print(f"  {bc}┌── {r}{title} {bc}{'─' * rpad}┐{r}")
+    else:
+        print(f"  {bc}┌{'─' * iw}┐{r}")
+
+    print(f"  {bc}│{r}{' ' * iw}{bc}│{r}")
+    for line in lines:
+        pad = max(iw - _vlen(line), 0)
+        print(f"  {bc}│{r}{line}{' ' * pad}{bc}│{r}")
+    print(f"  {bc}│{r}{' ' * iw}{bc}│{r}")
+    print(f"  {bc}└{'─' * iw}┘{r}")
+
+
+def draw_table(headers, rows, bc=None):
+    """Draw a styled table with box-drawing characters."""
+    if bc is None:
+        bc = C.CY
+    r = C.RST
+    cw = [h[1] for h in headers]
+
+    # Top
+    print(f"  {bc}┌" + "┬".join("─" * (w + 2) for w in cw) + f"┐{r}")
+    # Header
+    line = f"  {bc}│{r}"
+    for (label, w) in headers:
+        pad = max(w - _vlen(label), 0)
+        line += f" {C.BLD}{C.W}{label}{r}{' ' * (pad + 1)}{bc}│{r}"
+    print(line)
+    # Sep
+    print(f"  {bc}├" + "┼".join("─" * (w + 2) for w in cw) + f"┤{r}")
+    # Rows
+    for row in rows:
+        line = f"  {bc}│{r}"
+        for i, cell in enumerate(row):
+            pad = max(cw[i] - _vlen(cell), 0)
+            line += f" {cell}{' ' * (pad + 1)}{bc}│{r}"
+        print(line)
+    # Bottom
+    print(f"  {bc}└" + "┴".join("─" * (w + 2) for w in cw) + f"┘{r}")
+
+
+# ─────────────────────────────────────────────────────
+#  Loading Spinner
+# ─────────────────────────────────────────────────────
+
+class Spinner:
+    """Animated loading spinner for long-running operations."""
+    FRAMES = ["|", "/", "-", "\\"]
+
+    def __init__(self, msg="Processando..."):
+        self.msg = msg
+        self._on = False
+        self._t = None
+
+    def start(self):
+        self._on = True
+        self._t = threading.Thread(target=self._run, daemon=True)
+        self._t.start()
+
+    def stop(self, done=None):
+        self._on = False
+        if self._t:
+            self._t.join()
+        if done:
+            print(f"\r  {C.G}✓{C.RST} {done}{' ' * 30}")
         else:
-            missing.append(header)
-            print_status("✗", f"{header}  {sev_color}[{severity}]{Colors.RESET}", Colors.RED)
-            print_colored(f"        {info['description']}", Colors.DIM)
+            print(f"\r{' ' * 60}\r", end="")
+
+    def _run(self):
+        i = 0
+        while self._on:
+            f = self.FRAMES[i % len(self.FRAMES)]
+            print(f"\r  {C.CY}{f}{C.RST} {self.msg}", end="", flush=True)
+            time.sleep(0.12)
+            i += 1
+
+
+# ─────────────────────────────────────────────────────
+#  Banners
+# ─────────────────────────────────────────────────────
+
+BANNER = f"""
+{C.CY}{C.BLD}  ██╗   ██╗██╗   ██╗██╗     ███╗   ██╗
+  ██║   ██║██║   ██║██║     ████╗  ██║
+  ██║   ██║██║   ██║██║     ██╔██╗ ██║
+  ╚██╗ ██╔╝██║   ██║██║     ██║╚██╗██║
+   ╚████╔╝ ╚██████╔╝███████╗██║ ╚████║
+    ╚═══╝   ╚═════╝ ╚══════╝╚═╝  ╚═══╝{C.RST}
+{C.W}{C.BLD}           R  E  C  O  N{C.RST}
+{C.DIM}  ──────────────────────────────────────
+{C.W}   Security Auditing Tool  {C.DIM}v2.0
+  ──────────────────────────────────────{C.RST}
+"""
+
+BANNER_MINI = f"\n{C.CY}{C.BLD}  ▸ VULNRECON{C.RST} {C.DIM}v2.0{C.RST}\n{C.DIM}  ──────────────────────────────────────{C.RST}\n"
+
+
+# ─────────────────────────────────────────────────────
+#  Target Resolution
+# ─────────────────────────────────────────────────────
+
+def resolve_target(raw):
+    """Parse and validate target. Returns dict or None."""
+    raw = raw.strip()
+    if not raw:
+        return None
+    if not raw.startswith(("http://", "https://")):
+        url = f"http://{raw}"
+    else:
+        url = raw
+    hostname = urlparse(url).hostname
+    if not hostname:
+        return None
+    try:
+        ip = socket.gethostbyname(hostname)
+    except socket.gaierror:
+        return None
+    return {"hostname": hostname, "ip": ip, "url": url}
+
+
+def prompt_target():
+    """Interactively prompt for a target with validation. Returns dict or None."""
+    w = get_panel_width()
+    while True:
+        print()
+        draw_box([
+            f"  {C.W}{C.BLD}Digite o alvo para escanear{C.RST}",
+            f"  {C.DIM}Hostname, IP ou URL (ex: scanme.nmap.org){C.RST}",
+            f"  {C.Y}Digite 0 para voltar ao menu{C.RST}",
+        ], width=w, title=f"{C.CY}{C.BLD}ALVO{C.RST}")
+        print()
+        try:
+            user_input = input(f"  {C.CY}▸{C.RST} ").strip()
+        except (KeyboardInterrupt, EOFError):
+            return None
+        if user_input in ("0", ""):
+            return None
+
+        spinner = Spinner("Resolvendo alvo...")
+        spinner.start()
+        target = resolve_target(user_input)
+        spinner.stop()
+
+        if target is None:
+            print()
+            draw_box([
+                f"  {C.R}Nao foi possivel resolver '{user_input}'{C.RST}",
+                f"  {C.DIM}Verifique o hostname/IP e sua conexao.{C.RST}",
+            ], width=w, title=f"{C.R}{C.BLD}ERRO{C.RST}", bc=C.R)
+            continue
+
+        print()
+        draw_box([
+            f"  {C.G}Alvo resolvido com sucesso!{C.RST}",
+            f"  {C.W}Host: {C.BLD}{target['hostname']}{C.RST}",
+            f"  {C.W}IP:   {C.BLD}{target['ip']}{C.RST}",
+        ], width=w, title=f"{C.G}{C.BLD}OK{C.RST}", bc=C.G)
+        return target
+
+
+# ─────────────────────────────────────────────────────
+#  Module 1: Port Scanner
+# ─────────────────────────────────────────────────────
+
+COMMON_PORTS = {
+    21: "FTP", 22: "SSH", 23: "Telnet", 25: "SMTP", 53: "DNS",
+    80: "HTTP", 110: "POP3", 143: "IMAP", 443: "HTTPS", 445: "SMB",
+    993: "IMAPS", 995: "POP3S", 3306: "MySQL", 3389: "RDP",
+    5432: "PostgreSQL", 5900: "VNC", 6379: "Redis",
+    8080: "HTTP-Alt", 8443: "HTTPS-Alt", 27017: "MongoDB",
+}
+
+
+def _scan_port(ip, port, timeout):
+    svc = COMMON_PORTS.get(port, "?")
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(timeout)
+            return {"port": port, "service": svc, "is_open": s.connect_ex((ip, port)) == 0}
+    except (socket.timeout, OSError):
+        return {"port": port, "service": svc, "is_open": False}
+
+
+def run_port_scanner(target, timeout=1.5, threads=20):
+    w = get_panel_width()
+    print(BANNER_MINI)
+    draw_box([
+        f"  {C.W}Alvo:    {C.BLD}{target['hostname']}{C.RST} ({target['ip']})",
+        f"  {C.W}Portas:  {C.BLD}{len(COMMON_PORTS)}{C.RST} | Timeout: {C.BLD}{timeout}s{C.RST} | Threads: {C.BLD}{threads}{C.RST}",
+    ], width=w, title=f"{C.CY}{C.BLD}SCANNER DE PORTAS{C.RST}")
 
     print()
-    score = len(present) / len(SECURITY_HEADERS) * 100
-    score_color = Colors.GREEN if score >= 70 else (Colors.YELLOW if score >= 40 else Colors.RED)
-    print_colored(
-        f"  Header Score: {score_color}{Colors.BOLD}{score:.0f}%{Colors.RESET}"
-        f"{Colors.DIM} ({len(present)}/{len(SECURITY_HEADERS)} headers present){Colors.RESET}",
-        ""
-    )
+    sp = Spinner("Escaneando portas...")
+    sp.start()
+    t0 = time.time()
+    results = []
+    with ThreadPoolExecutor(max_workers=threads) as ex:
+        futs = {ex.submit(_scan_port, target["ip"], p, timeout): p for p in COMMON_PORTS}
+        for f in as_completed(futs):
+            try:
+                results.append(f.result())
+            except Exception:
+                p = futs[f]
+                results.append({"port": p, "service": COMMON_PORTS.get(p, "?"), "is_open": False})
+    elapsed = time.time() - t0
+    sp.stop(f"Scan concluido em {elapsed:.2f}s")
 
+    results.sort(key=lambda r: r["port"])
+    hdr = [("Porta", 8), ("Servico", 14), ("Status", 16)]
+    rows = []
+    open_n = 0
+    for r in results:
+        if r["is_open"]:
+            open_n += 1
+            rows.append([f"{r['port']}/tcp", r["service"], f"{C.R}{C.BLD}● ABERTA{C.RST}"])
+        else:
+            rows.append([f"{r['port']}/tcp", r["service"], f"{C.G}○ FECHADA{C.RST}"])
+
+    print()
+    draw_table(hdr, rows)
+    closed_n = len(results) - open_n
+    print()
+    if open_n:
+        draw_box([
+            f"  {C.R}{C.BLD}{open_n} aberta(s){C.RST} {C.DIM}|{C.RST} {C.G}{closed_n} fechada(s){C.RST}",
+            f"  {C.Y}Portas abertas podem indicar servicos expostos!{C.RST}",
+        ], width=w, title=f"{C.Y}{C.BLD}RESULTADO{C.RST}", bc=C.Y)
+    else:
+        draw_box([
+            f"  {C.G}{C.BLD}Todas as {len(results)} portas estao fechadas.{C.RST}",
+        ], width=w, title=f"{C.G}{C.BLD}RESULTADO{C.RST}", bc=C.G)
+    return results
+
+
+# ─────────────────────────────────────────────────────
+#  Module 2: HTTP Security Headers
+# ─────────────────────────────────────────────────────
+
+SECURITY_HEADERS = {
+    "Strict-Transport-Security": ("ALTA",  "Protege contra SSL-stripping."),
+    "X-Frame-Options":          ("MEDIA", "Previne clickjacking (iframe)."),
+    "X-Content-Type-Options":   ("MEDIA", "Previne MIME-type sniffing."),
+    "Content-Security-Policy":  ("ALTA",  "Controla recursos, mitiga XSS."),
+    "X-XSS-Protection":         ("BAIXA", "Filtro XSS legado (fallback)."),
+    "Referrer-Policy":           ("BAIXA", "Controla info de referrer."),
+    "Permissions-Policy":        ("MEDIA", "Restringe camera, mic, geoloc."),
+}
+SEV_C = {"ALTA": C.R, "MEDIA": C.Y, "BAIXA": C.DIM}
+
+
+def run_header_analysis(target, timeout=10):
+    w = get_panel_width()
+    print(BANNER_MINI)
+    draw_box([
+        f"  {C.W}Alvo: {C.BLD}{target['url']}{C.RST}",
+        f"  {C.W}Headers analisados: {C.BLD}{len(SECURITY_HEADERS)}{C.RST}",
+    ], width=w, title=f"{C.CY}{C.BLD}CABECALHOS DE SEGURANCA{C.RST}")
+
+    print()
+    sp = Spinner("Requisitando cabecalhos...")
+    sp.start()
+    try:
+        resp = requests.get(target["url"], timeout=timeout, allow_redirects=True, verify=False)
+    except (Timeout, ConnectionError, RequestException) as e:
+        sp.stop()
+        print()
+        draw_box([f"  {C.R}Falha na conexao: {e}{C.RST}"], width=w, title=f"{C.R}{C.BLD}ERRO{C.RST}", bc=C.R)
+        return {"present": [], "missing": list(SECURITY_HEADERS.keys()), "error": True}
+
+    sp.stop(f"HTTP {resp.status_code} — {len(resp.headers)} headers recebidos")
+
+    present, missing, lines = [], [], []
+    for h, (sev, desc) in SECURITY_HEADERS.items():
+        sc = SEV_C.get(sev, C.W)
+        val = resp.headers.get(h)
+        if val:
+            present.append(h)
+            v = (val[:38] + "...") if len(val) > 38 else val
+            lines.append(f"  {C.G}✓{C.RST} {C.W}{h}{C.RST}")
+            lines.append(f"    {C.DIM}{v}{C.RST}")
+        else:
+            missing.append(h)
+            lines.append(f"  {C.R}✗{C.RST} {C.W}{h}{C.RST} {sc}[{sev}]{C.RST}")
+            lines.append(f"    {C.DIM}{desc}{C.RST}")
+
+    print()
+    draw_box(lines, width=w, title=f"{C.CY}{C.BLD}ANALISE{C.RST}")
+
+    score = len(present) / len(SECURITY_HEADERS) * 100
+    sc = C.G if score >= 70 else (C.Y if score >= 40 else C.R)
+    print()
+    draw_box([
+        f"  {C.W}Score: {sc}{C.BLD}{score:.0f}%{C.RST} ({len(present)}/{len(SECURITY_HEADERS)})",
+        f"  {C.G}{C.BLD}{len(present)} presente(s){C.RST} {C.DIM}|{C.RST} {C.R}{C.BLD}{len(missing)} ausente(s){C.RST}",
+    ], width=w, title=f"{C.Y}{C.BLD}RESULTADO{C.RST}", bc=sc)
     return {"present": present, "missing": missing, "error": False}
 
 
-# ──────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
 #  Module 3: Directory Fuzzer
-# ──────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
 
 FUZZ_PATHS = [
-    # Version Control & CI/CD
-    "/.git/",
-    "/.git/config",
-    "/.gitignore",
-    "/.svn/",
-    "/.hg/",
-    # Environment & Configuration
-    "/.env",
-    "/.env.bak",
-    "/config.php",
-    "/config.yml",
-    "/wp-config.php",
-    "/web.config",
-    # Admin Panels
-    "/admin",
-    "/admin/",
-    "/administrator/",
-    "/wp-admin/",
-    "/wp-login.php",
-    "/phpmyadmin/",
-    "/cpanel",
-    "/webmail",
-    # Backups & Sensitive Files
-    "/backup.zip",
-    "/backup.tar.gz",
-    "/database.sql",
-    "/db.sql",
-    "/dump.sql",
-    "/.htaccess",
-    "/.htpasswd",
-    # Server Information
-    "/server-status",
-    "/server-info",
-    "/phpinfo.php",
-    "/info.php",
-    # Common Discovery
-    "/robots.txt",
-    "/sitemap.xml",
-    "/crossdomain.xml",
-    "/humans.txt",
-    "/security.txt",
-    "/.well-known/security.txt",
-    # API Endpoints
-    "/api/",
-    "/api/v1/",
-    "/swagger.json",
-    "/openapi.json",
-    "/graphql",
+    "/.git/", "/.git/config", "/.gitignore", "/.svn/", "/.hg/",
+    "/.env", "/.env.bak", "/config.php", "/config.yml",
+    "/wp-config.php", "/web.config",
+    "/admin", "/admin/", "/administrator/", "/wp-admin/",
+    "/wp-login.php", "/phpmyadmin/", "/cpanel", "/webmail",
+    "/backup.zip", "/backup.tar.gz", "/database.sql",
+    "/db.sql", "/dump.sql", "/.htaccess", "/.htpasswd",
+    "/server-status", "/server-info", "/phpinfo.php", "/info.php",
+    "/robots.txt", "/sitemap.xml", "/crossdomain.xml",
+    "/humans.txt", "/security.txt", "/.well-known/security.txt",
+    "/api/", "/api/v1/", "/swagger.json", "/openapi.json", "/graphql",
 ]
-
-# HTTP Status codes considered "interesting" (not 404)
-INTERESTING_CODES = {200, 201, 301, 302, 307, 308, 401, 403, 500}
-
-STATUS_COLOR_MAP = {
-    200: Colors.RED,      # Found — potential exposure
-    201: Colors.RED,
-    301: Colors.YELLOW,   # Redirect
-    302: Colors.YELLOW,
-    307: Colors.YELLOW,
-    308: Colors.YELLOW,
-    401: Colors.MAGENTA,  # Auth required — exists but protected
-    403: Colors.MAGENTA,  # Forbidden — exists but restricted
-    500: Colors.YELLOW,   # Server error — might reveal info
+INTERESTING = {200, 201, 301, 302, 307, 308, 401, 403, 500}
+STATUS_LBL = {
+    200: ("ENCONTRADO", C.R), 201: ("ENCONTRADO", C.R),
+    301: ("REDIRECT", C.Y), 302: ("REDIRECT", C.Y),
+    307: ("REDIRECT", C.Y), 308: ("REDIRECT", C.Y),
+    401: ("PROTEGIDO", C.M), 403: ("PROIBIDO", C.M),
+    500: ("ERRO SVR", C.Y),
 }
 
 
-def fuzz_single_path(base_url: str, path: str, timeout: float) -> dict:
-    """
-    Send a GET request to base_url + path and return the result.
-    Returns dict with 'path', 'status_code', and 'interesting' flag.
-    """
-    full_url = base_url.rstrip("/") + path
+def _fuzz_path(base, path, timeout):
     try:
-        response = requests.get(
-            full_url,
-            timeout=timeout,
-            allow_redirects=False,
-            verify=False,
-            headers={"User-Agent": "VulnRecon/1.0 (Security Audit)"}
-        )
-        status = response.status_code
-        return {
-            "path": path,
-            "status_code": status,
-            "interesting": status in INTERESTING_CODES,
-        }
-    except (Timeout, ConnectionError):
-        return {"path": path, "status_code": None, "interesting": False}
-    except RequestException:
-        return {"path": path, "status_code": None, "interesting": False}
+        r = requests.get(base.rstrip("/") + path, timeout=timeout,
+                         allow_redirects=False, verify=False,
+                         headers={"User-Agent": "VulnRecon/2.0"})
+        return {"path": path, "code": r.status_code, "hit": r.status_code in INTERESTING}
+    except (Timeout, ConnectionError, RequestException):
+        return {"path": path, "code": None, "hit": False}
 
 
-def run_directory_fuzzer(target: dict, timeout: float = 5, threads: int = 10) -> list:
-    """
-    Fuzz the target for common sensitive paths using a thread pool.
-    Returns a list of result dicts.
-    """
-    print_section_header("DIRECTORY FUZZER")
+def run_directory_fuzzer(target, timeout=5, threads=10):
+    w = get_panel_width()
+    print(BANNER_MINI)
+    draw_box([
+        f"  {C.W}Alvo:     {C.BLD}{target['url']}{C.RST}",
+        f"  {C.W}Wordlist: {C.BLD}{len(FUZZ_PATHS)}{C.RST} rotas | Threads: {C.BLD}{threads}{C.RST}",
+    ], width=w, title=f"{C.CY}{C.BLD}CACA-DIRETORIOS{C.RST}")
 
-    base_url = target["url"]
-    print_colored(f"  Target:    {base_url}", Colors.WHITE)
-    print_colored(f"  Wordlist:  {len(FUZZ_PATHS)} paths | Threads: {threads}", Colors.DIM)
     print()
-
+    sp = Spinner("Fuzzing em andamento...")
+    sp.start()
+    t0 = time.time()
     results = []
-    start_time = time.time()
-
-    # Suppress InsecureRequestWarning
-    import urllib3
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-    with ThreadPoolExecutor(max_workers=threads) as executor:
-        futures = {
-            executor.submit(fuzz_single_path, base_url, path, timeout): path
-            for path in FUZZ_PATHS
-        }
-        for future in as_completed(futures):
+    with ThreadPoolExecutor(max_workers=threads) as ex:
+        futs = {ex.submit(_fuzz_path, target["url"], p, timeout): p for p in FUZZ_PATHS}
+        for f in as_completed(futs):
             try:
-                result = future.result()
-                results.append(result)
+                results.append(f.result())
             except Exception:
-                path = futures[future]
-                results.append({"path": path, "status_code": None, "interesting": False})
+                results.append({"path": futs[f], "code": None, "hit": False})
+    elapsed = time.time() - t0
+    sp.stop(f"Fuzzing concluido em {elapsed:.2f}s")
 
-    elapsed = time.time() - start_time
-
-    # Sort: interesting first, then by path
-    results.sort(key=lambda r: (not r["interesting"], r["path"]))
-
-    interesting_count = 0
-    not_found_count = 0
-
+    results.sort(key=lambda r: (not r["hit"], r["path"]))
+    hdr = [("Rota", 30), ("HTTP", 6), ("Veredicto", 14)]
+    rows = []
+    hit_n = 0
     for r in results:
-        path = r["path"]
-        code = r["status_code"]
-
-        if code is None:
-            # Connection failed for this path
-            print_status("—", f"{path:<35} {'TIMEOUT':>10}", Colors.DIM)
-            not_found_count += 1
-        elif r["interesting"]:
-            color = STATUS_COLOR_MAP.get(code, Colors.YELLOW)
-            print_status("!", f"{path:<35} {f'HTTP {code}':>10}", color)
-            interesting_count += 1
+        p = r["path"][:28] + ".." if len(r["path"]) > 30 else r["path"]
+        if r["code"] is None:
+            rows.append([f"{C.DIM}{p}{C.RST}", f"{C.DIM}---{C.RST}", f"{C.DIM}TIMEOUT{C.RST}"])
+        elif r["hit"]:
+            hit_n += 1
+            lbl, clr = STATUS_LBL.get(r["code"], ("FOUND", C.Y))
+            rows.append([p, f"{clr}{r['code']}{C.RST}", f"{clr}{C.BLD}{lbl}{C.RST}"])
         else:
-            print_status("·", f"{path:<35} {f'HTTP {code}':>10}", Colors.GREEN)
-            not_found_count += 1
+            rows.append([f"{C.DIM}{p}{C.RST}", f"{C.DIM}{r['code']}{C.RST}", f"{C.G}OK{C.RST}"])
 
     print()
-    print_colored(f"  Fuzzing completed in {elapsed:.2f}s", Colors.DIM)
-    print_colored(
-        f"  Results: {Colors.RED}{Colors.BOLD}{interesting_count} found{Colors.RESET}"
-        f"{Colors.DIM} · {Colors.GREEN}{not_found_count} not found{Colors.RESET}",
-        ""
-    )
-
+    draw_table(hdr, rows)
+    safe_n = len(results) - hit_n
+    print()
+    if hit_n:
+        draw_box([
+            f"  {C.R}{C.BLD}{hit_n} exposta(s){C.RST} {C.DIM}|{C.RST} {C.G}{safe_n} segura(s){C.RST}",
+            f"  {C.Y}Rotas expostas podem vazar informacoes sensiveis!{C.RST}",
+        ], width=w, title=f"{C.Y}{C.BLD}RESULTADO{C.RST}", bc=C.Y)
+    else:
+        draw_box([
+            f"  {C.G}{C.BLD}Nenhuma rota sensivel exposta.{C.RST}",
+        ], width=w, title=f"{C.G}{C.BLD}RESULTADO{C.RST}", bc=C.G)
     return results
 
 
-# ──────────────────────────────────────────────
-#  Report Summary
-# ──────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
+#  Full Audit
+# ─────────────────────────────────────────────────────
 
-def print_summary(target: dict, port_results: list, header_results: dict, fuzz_results: list) -> None:
-    """Print a consolidated summary of all scan results."""
-    print_section_header("AUDIT SUMMARY")
-    print_colored(f"  Target: {target['hostname']} ({target['ip']})", Colors.WHITE)
+def run_full_audit(target):
+    """Run all modules sequentially with pauses between them."""
+    w = get_panel_width()
+    port_res = run_port_scanner(target)
     print()
+    input(f"  {C.DIM}Pressione Enter para continuar...{C.RST}")
+    clear_screen()
 
-    findings = 0
-
-    # Port scan summary
-    if port_results:
-        open_ports = [r for r in port_results if r["is_open"]]
-        if open_ports:
-            findings += len(open_ports)
-            ports_str = ", ".join(f"{r['port']}/{r['service']}" for r in open_ports)
-            print_status("⚠", f"Open ports detected: {ports_str}", Colors.RED)
-        else:
-            print_status("✓", "No open ports detected on common services.", Colors.GREEN)
-
-    # Header analysis summary
-    if header_results and not header_results.get("error"):
-        missing = header_results.get("missing", [])
-        if missing:
-            findings += len(missing)
-            print_status("⚠", f"Missing security headers: {len(missing)}/{len(SECURITY_HEADERS)}", Colors.RED)
-            for h in missing:
-                sev = SECURITY_HEADERS[h]["severity"]
-                sev_color = SEVERITY_COLORS.get(sev, Colors.WHITE)
-                print_colored(f"        → {h} {sev_color}[{sev}]{Colors.RESET}", Colors.DIM)
-        else:
-            print_status("✓", "All security headers are present.", Colors.GREEN)
-
-    # Directory fuzzer summary
-    if fuzz_results:
-        exposed = [r for r in fuzz_results if r["interesting"]]
-        if exposed:
-            findings += len(exposed)
-            print_status("⚠", f"Exposed paths found: {len(exposed)}", Colors.RED)
-            for r in exposed:
-                code_color = STATUS_COLOR_MAP.get(r["status_code"], Colors.YELLOW)
-                print_colored(
-                    f"        → {r['path']} {code_color}[HTTP {r['status_code']}]{Colors.RESET}",
-                    Colors.DIM
-                )
-        else:
-            print_status("✓", "No sensitive paths exposed.", Colors.GREEN)
-
-    # Final verdict
+    hdr_res = run_header_analysis(target)
     print()
-    if findings == 0:
-        print_colored(
-            f"  {Colors.GREEN}{Colors.BOLD}▸ No findings. Target appears well-configured.{Colors.RESET}", ""
-        )
+    input(f"  {C.DIM}Pressione Enter para continuar...{C.RST}")
+    clear_screen()
+
+    fuzz_res = run_directory_fuzzer(target)
+
+    # Summary
+    op = len([r for r in port_res if r["is_open"]])
+    mh = len(hdr_res.get("missing", []))
+    ed = len([r for r in fuzz_res if r["hit"]])
+    total = op + mh + ed
+
+    if total == 0:
+        risk, rc = "BAIXO", C.G
+    elif total < 5:
+        risk, rc = "MEDIO", C.Y
+    elif total < 10:
+        risk, rc = "ALTO", C.R
     else:
-        risk = "CRITICAL" if findings >= 10 else ("HIGH" if findings >= 5 else "MEDIUM")
-        risk_color = Colors.RED if risk == "CRITICAL" else (Colors.RED if risk == "HIGH" else Colors.YELLOW)
-        print_colored(
-            f"  {risk_color}{Colors.BOLD}▸ {findings} finding(s) detected — Risk Level: {risk}{Colors.RESET}", ""
-        )
+        risk, rc = "CRITICO", C.R
 
     print()
-    print_colored("  Disclaimer: This tool is intended for authorized security", Colors.DIM)
-    print_colored("  auditing only. Always obtain proper permission before scanning.", Colors.DIM)
+    draw_box([
+        f"  {C.W}{C.BLD}Alvo: {target['hostname']}{C.RST} ({target['ip']})",
+        "",
+        f"  {C.CY}Portas abertas:      {C.R if op else C.G}{C.BLD}{op}{C.RST}",
+        f"  {C.CY}Headers ausentes:    {C.R if mh else C.G}{C.BLD}{mh}{C.RST}",
+        f"  {C.CY}Diretorios expostos: {C.R if ed else C.G}{C.BLD}{ed}{C.RST}",
+        "",
+        f"  {C.W}Total de achados: {rc}{C.BLD}{total}{C.RST}",
+        f"  {C.W}Nivel de risco:   {rc}{C.BLD}{risk}{C.RST}",
+    ], width=w, title=f"{C.CY}{C.BLD}RESUMO DA AUDITORIA{C.RST}")
+
+
+# ─────────────────────────────────────────────────────
+#  Help / About Page
+# ─────────────────────────────────────────────────────
+
+def show_help():
+    """Display help page with explanations in Portuguese."""
+    w = get_panel_width()
+    print(BANNER_MINI)
+
+    draw_box([
+        f"  {C.CY}{C.BLD}VulnRecon{C.RST} e uma ferramenta de auditoria",
+        f"  de seguranca que roda no terminal.",
+        f"  Identifica vulnerabilidades em servidores.",
+    ], width=w, title=f"{C.CY}{C.BLD}O QUE E?{C.RST}")
+
     print()
+    draw_box([
+        f"  {C.W}{C.BLD}[1] Scanner de Portas{C.RST}",
+        f"  {C.DIM}Testa conexoes TCP em 20 portas criticas.{C.RST}",
+        f"  {C.DIM}Portas abertas = servicos expostos.{C.RST}",
+        "",
+        f"  {C.W}{C.BLD}[2] Cabecalhos de Seguranca{C.RST}",
+        f"  {C.DIM}Analisa 7 headers HTTP essenciais que{C.RST}",
+        f"  {C.DIM}protegem contra XSS, clickjacking, etc.{C.RST}",
+        "",
+        f"  {C.W}{C.BLD}[3] Caca-Diretorios{C.RST}",
+        f"  {C.DIM}Busca rotas sensiveis (.git, .env, /admin){C.RST}",
+        f"  {C.DIM}que podem vazar dados criticos.{C.RST}",
+    ], width=w, title=f"{C.CY}{C.BLD}MODULOS{C.RST}")
+
+    print()
+    draw_box([
+        f"  {C.R}{C.BLD}AVISO LEGAL{C.RST}",
+        "",
+        f"  {C.W}Use SOMENTE em alvos com autorizacao.{C.RST}",
+        f"  {C.W}Para testes, use:{C.RST}",
+        f"  {C.G}{C.BLD}scanme.nmap.org{C.RST} {C.DIM}(autorizado pelo Nmap){C.RST}",
+        "",
+        f"  {C.DIM}Escanear sem permissao e ILEGAL e pode{C.RST}",
+        f"  {C.DIM}resultar em consequencias juridicas.{C.RST}",
+    ], width=w, title=f"{C.R}{C.BLD}USO LEGAL{C.RST}", bc=C.R)
 
 
-# ──────────────────────────────────────────────
-#  CLI Argument Parser
-# ──────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
+#  Interactive Menu
+# ─────────────────────────────────────────────────────
 
-def build_argument_parser() -> argparse.ArgumentParser:
-    """Build and return the CLI argument parser."""
-    parser = argparse.ArgumentParser(
-        prog="vulnrecon",
-        description="VulnRecon — CLI Security Auditing Tool",
-        epilog="Example: python vulnrecon.py scanme.nmap.org --all",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-
-    parser.add_argument(
-        "target",
-        help="Target hostname, IP address, or URL to scan (e.g., scanme.nmap.org)"
-    )
-
-    # Module selection
-    module_group = parser.add_argument_group("modules")
-    module_group.add_argument(
-        "-p", "--ports",
-        action="store_true",
-        help="Run the TCP port scanner"
-    )
-    module_group.add_argument(
-        "-H", "--headers",
-        action="store_true",
-        help="Run the HTTP security headers analyzer"
-    )
-    module_group.add_argument(
-        "-f", "--fuzz",
-        action="store_true",
-        help="Run the directory fuzzer"
-    )
-    module_group.add_argument(
-        "-A", "--all",
-        action="store_true",
-        help="Run all modules (ports + headers + fuzz)"
-    )
-
-    # Configuration
-    config_group = parser.add_argument_group("configuration")
-    config_group.add_argument(
-        "-t", "--timeout",
-        type=float,
-        default=1.5,
-        help="Connection timeout in seconds (default: 1.5)"
-    )
-    config_group.add_argument(
-        "--threads",
-        type=int,
-        default=20,
-        help="Number of concurrent threads (default: 20)"
-    )
-
-    return parser
+def show_menu():
+    """Display the main interactive menu."""
+    w = get_panel_width()
+    draw_box([
+        f"  {C.CY}{C.BLD}[1]{C.RST}  {C.W}{C.BLD}Auditoria Completa{C.RST}",
+        f"       {C.DIM}Portas + Headers + Diretorios{C.RST}",
+        "",
+        f"  {C.CY}{C.BLD}[2]{C.RST}  {C.W}{C.BLD}Escanear Portas{C.RST}",
+        f"       {C.DIM}Testa conexoes TCP nas portas criticas{C.RST}",
+        "",
+        f"  {C.CY}{C.BLD}[3]{C.RST}  {C.W}{C.BLD}Verificar Cabecalhos HTTP{C.RST}",
+        f"       {C.DIM}Analisa headers de seguranca do servidor{C.RST}",
+        "",
+        f"  {C.CY}{C.BLD}[4]{C.RST}  {C.W}{C.BLD}Cacar Diretorios Ocultos{C.RST}",
+        f"       {C.DIM}Fuzzing em rotas sensiveis{C.RST}",
+        "",
+        f"  {C.CY}{C.BLD}[5]{C.RST}  {C.W}{C.BLD}Ajuda / Sobre{C.RST}",
+        f"       {C.DIM}Conceitos e uso legal{C.RST}",
+        "",
+        f"  {C.R}{C.BLD}[0]{C.RST}  {C.DIM}Sair{C.RST}",
+    ], width=w, title=f"{C.CY}{C.BLD}MENU PRINCIPAL{C.RST}")
 
 
-# ──────────────────────────────────────────────
+def run_scan_module(choice, target):
+    """Execute the selected scan module."""
+    clear_screen()
+    if choice == "1":
+        run_full_audit(target)
+    elif choice == "2":
+        run_port_scanner(target)
+    elif choice == "3":
+        run_header_analysis(target)
+    elif choice == "4":
+        run_directory_fuzzer(target)
+
+
+# ─────────────────────────────────────────────────────
 #  Main Entry Point
-# ──────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
 
-def main() -> None:
-    """Main execution flow for VulnRecon."""
-    parser = build_argument_parser()
-    args = parser.parse_args()
+def main():
+    """Main interactive loop."""
+    setup_console()
 
-    # Print banner
-    print(BANNER)
-
-    # If no module flag is set, default to --all
-    if not (args.ports or args.headers or args.fuzz or args.all):
-        args.all = True
-
-    # Resolve target
-    print_colored(f"  Resolving target: {args.target} …", Colors.DIM)
-    target = resolve_target(args.target)
-
-    if target is None:
+    while True:
+        clear_screen()
+        print(BANNER)
+        show_menu()
         print()
-        print_status("✗", f"Could not resolve target '{args.target}'.", Colors.RED)
-        print_colored("    Please check the hostname/IP and your network connection.", Colors.DIM)
-        print()
-        sys.exit(1)
 
-    print_status("✓", f"Resolved to {target['ip']} ({target['hostname']})", Colors.GREEN)
+        try:
+            choice = input(f"  {C.CY}▸ Escolha uma opcao:{C.RST} ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print(f"\n\n  {C.DIM}Ate logo!{C.RST}\n")
+            break
 
-    # Execution timestamp
-    timestamp = time.strftime("%Y-%m-%d %H:%M:%S %Z")
-    print_colored(f"  Started at: {timestamp}", Colors.DIM)
+        if choice == "0":
+            clear_screen()
+            print(BANNER)
+            draw_box([
+                f"  {C.G}Obrigado por usar o VulnRecon!{C.RST}",
+                f"  {C.DIM}Fique seguro. Hackeie com responsabilidade.{C.RST}",
+            ], width=get_panel_width(), title=f"{C.G}{C.BLD}ATE LOGO{C.RST}", bc=C.G)
+            print()
+            break
 
-    # Initialize result containers
-    port_results = []
-    header_results = {}
-    fuzz_results = []
+        elif choice == "5":
+            clear_screen()
+            show_help()
+            print()
+            input(f"  {C.DIM}Pressione Enter para voltar ao menu...{C.RST}")
+            continue
 
-    # Run selected modules
-    try:
-        if args.all or args.ports:
-            port_results = run_port_scanner(target, timeout=args.timeout, threads=args.threads)
+        elif choice in ("1", "2", "3", "4"):
+            clear_screen()
+            print(BANNER_MINI)
+            target = prompt_target()
+            if target is None:
+                continue
+            print()
+            input(f"  {C.DIM}Pressione Enter para iniciar o scan...{C.RST}")
+            run_scan_module(choice, target)
+            print()
+            input(f"  {C.DIM}Pressione Enter para voltar ao menu...{C.RST}")
+            continue
 
-        if args.all or args.headers:
-            header_results = run_header_analysis(target)
-
-        if args.all or args.fuzz:
-            fuzz_results = run_directory_fuzzer(target, threads=args.threads)
-
-        # Print summary if more than one module ran
-        modules_ran = sum([bool(port_results), bool(header_results), bool(fuzz_results)])
-        if modules_ran >= 1:
-            print_summary(target, port_results, header_results, fuzz_results)
-
-    except KeyboardInterrupt:
-        print()
-        print_colored("\n  [!] Scan interrupted by user. Exiting…", Colors.YELLOW)
-        print()
-        sys.exit(130)
+        else:
+            # Invalid input — show styled error
+            print()
+            draw_box([
+                f"  {C.R}Opcao '{choice}' invalida.{C.RST}",
+                f"  {C.DIM}Digite um numero de 0 a 5.{C.RST}",
+            ], width=get_panel_width(), title=f"{C.R}{C.BLD}ERRO{C.RST}", bc=C.R)
+            time.sleep(1.5)
 
 
 if __name__ == "__main__":
