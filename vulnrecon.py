@@ -27,7 +27,7 @@ import hashlib
 import asyncio
 import ssl
 import html as html_mod
-from urllib.parse import urlparse, urlencode
+from urllib.parse import urlparse, urlencode, urljoin, parse_qs
 import argparse
 
 try:
@@ -270,6 +270,12 @@ TECH_PATTERNS = [
 # Global throttle
 THROTTLE_DELAY = 0.15
 
+# Adaptive HTTP behavior and advanced DAST settings
+HTTP_MAX_RETRIES = 3
+HTTP_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+DEFAULT_CRAWL_MAX_PAGES = 25
+DEFAULT_EVIDENCE_BODY_MAX = 2000
+
 
 # ─────────────────────────────────────────────────────
 #  UI Drawing Utilities
@@ -407,24 +413,48 @@ class AsyncHttpClient:
     def _pick_proxy(self):
         return random.choice(self.proxies) if self.proxies else None
 
-    async def get(self, session, url, allow_redirects=True, extra_headers=None, verify_ssl=False):
-        """Perform async GET with jitter delay, random UA, proxy, and auth."""
-        jitter = random.uniform(self.delay * 0.5, self.delay * 1.5) if self.delay > 0 else 0
-        if jitter > 0:
-            await asyncio.sleep(jitter)
-        headers = self._build_headers(extra_headers)
-        proxy = self._pick_proxy()
-        ssl_ctx = None if verify_ssl else self._ssl_ctx
-        try:
-            async with session.get(
-                url, headers=headers, allow_redirects=allow_redirects,
-                proxy=proxy, ssl=ssl_ctx, timeout=self.timeout
-            ) as resp:
-                body = await resp.text(errors="replace")
-                return AsyncResponse(resp.status, dict(resp.headers), body)
-        except (ClientConnectorError, ServerDisconnectedError, asyncio.TimeoutError,
-                ClientResponseError, aiohttp.ClientError, OSError) as e:
-            raise NetworkError(str(e)) from e
+    async def request(self, session, method, url, data=None, json_data=None, allow_redirects=True,
+                      extra_headers=None, verify_ssl=False, retries=HTTP_MAX_RETRIES):
+        """Perform async request with adaptive retries, jitter, and proxy rotation."""
+        last_error = None
+        for attempt in range(1, retries + 1):
+            jitter = random.uniform(self.delay * 0.5, self.delay * 1.5) if self.delay > 0 else 0
+            if jitter > 0:
+                await asyncio.sleep(jitter)
+            headers = self._build_headers(extra_headers)
+            proxy = self._pick_proxy()
+            ssl_ctx = None if verify_ssl else self._ssl_ctx
+            try:
+                async with session.request(
+                    method, url, headers=headers, data=data, json=json_data,
+                    allow_redirects=allow_redirects, proxy=proxy, ssl=ssl_ctx, timeout=self.timeout
+                ) as resp:
+                    body = await resp.text(errors="replace")
+                    if resp.status in HTTP_RETRYABLE_STATUS and attempt < retries:
+                        await asyncio.sleep(min(0.5 * (2 ** (attempt - 1)), 3.0))
+                        continue
+                    return AsyncResponse(resp.status, dict(resp.headers), body)
+            except (ClientConnectorError, ServerDisconnectedError, asyncio.TimeoutError,
+                    ClientResponseError, aiohttp.ClientError, OSError) as e:
+                last_error = e
+                if attempt < retries:
+                    await asyncio.sleep(min(0.5 * (2 ** (attempt - 1)), 3.0))
+                    continue
+                break
+        raise NetworkError(str(last_error) if last_error else "Network request failed")
+
+    async def get(self, session, url, allow_redirects=True, extra_headers=None, verify_ssl=False, retries=HTTP_MAX_RETRIES):
+        return await self.request(
+            session, "GET", url, allow_redirects=allow_redirects,
+            extra_headers=extra_headers, verify_ssl=verify_ssl, retries=retries
+        )
+
+    async def post(self, session, url, data=None, json_data=None, allow_redirects=True,
+                   extra_headers=None, verify_ssl=False, retries=HTTP_MAX_RETRIES):
+        return await self.request(
+            session, "POST", url, data=data, json_data=json_data, allow_redirects=allow_redirects,
+            extra_headers=extra_headers, verify_ssl=verify_ssl, retries=retries
+        )
 
 
 class AsyncResponse:
@@ -531,6 +561,270 @@ class InteractshClient:
             "status": "stub — nao implementado",
         }
 
+
+# ─────────────────────────────────────────────────────
+#  Advanced DAST Utilities (Auth, Evidence, Recon, Active Tests)
+# ─────────────────────────────────────────────────────
+
+def _mk_evidence(method, url, payload, status, response_text, headers=None):
+    return {
+        "request": {"method": method, "url": url, "payload": payload or {}, "headers": headers or {}},
+        "response": {"status_code": status, "snippet": (response_text or "")[:DEFAULT_EVIDENCE_BODY_MAX]},
+    }
+
+
+def _extract_version_hint(text):
+    m = re.search(r"(\d+\.\d+(?:\.\d+)?)", text or "")
+    return m.group(1) if m else None
+
+
+async def run_stateful_auth_crawler(target, http_client=None, timeout=10, login_profile=None, max_pages=DEFAULT_CRAWL_MAX_PAGES):
+    """Stateful authenticated crawler with optional login form submission."""
+    client = http_client or AsyncHttpClient(timeout=timeout)
+    visited = set()
+    to_visit = [target["url"]]
+    queued = {target["url"]}
+    auth_info = {"attempted": False, "authenticated": False, "login_url": None}
+    pages = []
+
+    async with aiohttp.ClientSession(cookie_jar=aiohttp.CookieJar(unsafe=True)) as session:
+        if login_profile and login_profile.get("url") and login_profile.get("username") and login_profile.get("password"):
+            auth_info["attempted"] = True
+            auth_info["login_url"] = login_profile["url"]
+            try:
+                login_page = await client.get(session, login_profile["url"])
+                soup = BeautifulSoup(login_page.text[:60000], "html.parser")
+                form = soup.find("form")
+                if form:
+                    action = form.get("action") or login_profile["url"]
+                    post_url = urljoin(login_profile["url"], action)
+                    data = {}
+                    for inp in form.find_all("input"):
+                        name = inp.get("name")
+                        if not name:
+                            continue
+                        value = inp.get("value", "")
+                        data[name] = value
+                    user_key = login_profile.get("user_field", "username")
+                    pass_key = login_profile.get("pass_field", "password")
+                    data[user_key] = login_profile["username"]
+                    data[pass_key] = login_profile["password"]
+                    if login_profile.get("extra_fields"):
+                        data.update(login_profile["extra_fields"])
+                    login_resp = await client.post(session, post_url, data=data)
+                    auth_info["authenticated"] = login_resp.status_code in (200, 302, 303)
+            except NetworkError:
+                auth_info["authenticated"] = False
+
+        while to_visit and len(visited) < max_pages:
+            url = to_visit.pop(0)
+            queued.discard(url)
+            if url in visited:
+                continue
+            visited.add(url)
+            try:
+                resp = await client.get(session, url)
+            except NetworkError:
+                continue
+            pages.append({"url": url, "status": resp.status_code, "title": ""})
+            soup = BeautifulSoup(resp.text[:100000], "html.parser")
+            if soup.title and soup.title.string:
+                pages[-1]["title"] = soup.title.string.strip()[:100]
+            for tag in soup.find_all("a", href=True):
+                nxt = urljoin(url, tag["href"])
+                if urlparse(nxt).netloc == target["hostname"] and nxt not in visited and nxt not in queued:
+                    to_visit.append(nxt)
+                    queued.add(nxt)
+            for form in soup.find_all("form"):
+                action = form.get("action") or url
+                nxt = urljoin(url, action)
+                if urlparse(nxt).netloc == target["hostname"] and nxt not in visited and nxt not in queued:
+                    to_visit.append(nxt)
+                    queued.add(nxt)
+
+    return {"auth": auth_info, "pages": pages, "total_pages": len(pages)}
+
+
+async def run_recon_discovery(target, http_client=None, timeout=10):
+    """Extract parameters, JS hints, robots/sitemap, and API surface."""
+    client = http_client or AsyncHttpClient(timeout=timeout)
+    base = target["url"].rstrip("/")
+    out = {"robots": [], "sitemap": [], "params": [], "openapi": [], "graphql": []}
+    async with aiohttp.ClientSession() as session:
+        for endpoint in ("/robots.txt", "/sitemap.xml"):
+            try:
+                resp = await client.get(session, base + endpoint)
+            except NetworkError:
+                continue
+            if resp.status_code != 200:
+                continue
+            lines = [l.strip() for l in resp.text.splitlines() if l.strip()]
+            if endpoint == "/robots.txt":
+                out["robots"] = lines[:200]
+            else:
+                out["sitemap"] = lines[:300]
+
+        try:
+            home = await client.get(session, target["url"])
+        except NetworkError:
+            return out
+        soup = BeautifulSoup(home.text[:120000], "html.parser")
+
+        for a in soup.find_all("a", href=True):
+            href = urljoin(target["url"], a["href"])
+            p = urlparse(href)
+            if p.query:
+                out["params"].append({"url": f"{p.scheme}://{p.netloc}{p.path}", "params": list(parse_qs(p.query).keys())})
+
+        for script in soup.find_all("script"):
+            src = script.get("src", "")
+            body = script.text or ""
+            blob = f"{src}\n{body[:20000]}"
+            for m in re.findall(r"([a-zA-Z_][a-zA-Z0-9_]*)\s*[:=]\s*['\"]?[^'\"\s&]+", blob):
+                if m.lower() not in ("var", "let", "const", "function"):
+                    out["params"].append({"url": target["url"], "params": [m], "source": "js"})
+
+        for api_path in ("/openapi.json", "/swagger.json", "/v3/api-docs"):
+            try:
+                api_resp = await client.get(session, base + api_path)
+                if api_resp.status_code == 200 and ("openapi" in api_resp.text.lower() or "swagger" in api_resp.text.lower()):
+                    out["openapi"].append(base + api_path)
+            except NetworkError:
+                pass
+
+        for gql_path in ("/graphql", "/api/graphql"):
+            try:
+                gql = await client.post(session, base + gql_path, json_data={"query": "{ __typename }"})
+                if gql.status_code in (200, 400) and ("errors" in gql.text.lower() or "data" in gql.text.lower()):
+                    out["graphql"].append(base + gql_path)
+            except NetworkError:
+                pass
+
+    uniq = {}
+    for item in out["params"]:
+        key = (item.get("url"), tuple(sorted(item.get("params", []))))
+        uniq[key] = item
+    out["params"] = list(uniq.values())[:400]
+    return out
+
+
+async def run_active_owasp_checks(target, recon_data=None, http_client=None, timeout=10, oast_client=None):
+    """Active (safe) probes for common OWASP classes with evidence."""
+    client = http_client or AsyncHttpClient(timeout=timeout)
+    oast = oast_client or InteractshClient()
+    findings = []
+    seen_findings = set()
+    params = (recon_data or {}).get("params", [])
+    if not params:
+        params = [{"url": target["url"], "params": ["q", "id", "url", "redirect", "file"]}]
+
+    payloads = {
+        "SQLi": "' OR '1'='1",
+        "XSS-Reflected": "<svg/onload=alert(1)>",
+        "Path-Traversal": "../../../../etc/passwd",
+        "Command-Injection": ";id",
+        "Open-Redirect": "https://example.org",
+        "IDOR": "999999",
+        "SSRF": oast.generate_url("ssrf"),
+        "Blind-XSS": f"<img src='{oast.generate_url('bxss')}'>",
+    }
+
+    async with aiohttp.ClientSession() as session:
+        for item in params[:30]:
+            base_url = item.get("url") or target["url"]
+            pnames = list(dict.fromkeys(item.get("params", [])))[:4]
+            for p in pnames:
+                for vuln_type, payload in payloads.items():
+                    q = {p: payload}
+                    test_url = f"{base_url}?{urlencode(q)}"
+                    try:
+                        resp = await client.get(session, test_url, allow_redirects=False)
+                    except NetworkError:
+                        continue
+                    text_low = resp.text.lower()
+                    hit = False
+                    if vuln_type == "SQLi" and any(s in text_low for s in ("sql syntax", "mysql", "psqlexception", "sqlite")):
+                        hit = True
+                    elif vuln_type.startswith("XSS") and payload.lower() in text_low:
+                        hit = True
+                    elif vuln_type == "Path-Traversal" and ("root:x:" in text_low or "[boot loader]" in text_low):
+                        hit = True
+                    elif vuln_type == "Command-Injection" and ("uid=" in text_low or "gid=" in text_low):
+                        hit = True
+                    elif vuln_type == "Open-Redirect" and resp.status_code in (301, 302, 303, 307, 308) and payload in (resp.headers.get("Location", "")):
+                        hit = True
+                    elif vuln_type == "IDOR" and resp.status_code == 200 and "forbidden" not in text_low and "unauthorized" not in text_low:
+                        hit = True
+                    elif vuln_type in ("SSRF", "Blind-XSS"):
+                        hit = False
+                    if hit:
+                        sig = (vuln_type, test_url, p, resp.status_code)
+                        if sig in seen_findings:
+                            continue
+                        seen_findings.add(sig)
+                        findings.append({
+                            "type": vuln_type,
+                            "severity": "ALTA" if vuln_type in ("SQLi", "Command-Injection", "SSRF", "IDOR") else "MEDIA",
+                            "url": test_url,
+                            "param": p,
+                            "evidence": _mk_evidence("GET", test_url, q, resp.status_code, resp.text),
+                        })
+
+        # OAST validation from stub/client state
+        interactions = oast.poll_interactions()
+        if interactions:
+            findings.append({
+                "type": "OAST-Confirmed",
+                "severity": "CRITICA",
+                "url": target["url"],
+                "interaction_count": len(interactions),
+                "evidence": {"oast": interactions},
+            })
+    findings.sort(key=lambda f: (f.get("type", ""), f.get("url", ""), f.get("param", "")))
+    return findings
+
+
+async def run_contextual_fingerprint_and_cve(target, tech_data=None, http_client=None, timeout=10):
+    """Extract version hints and map to contextual CVE lookups (safe PoC mode)."""
+    tech_data = tech_data or []
+    versioned = []
+    cve_queries = []
+    for t in tech_data:
+        tech_name = t.get("tech", "")
+        version = _extract_version_hint(tech_name)
+        if version:
+            versioned.append({"tech": tech_name, "version": version, "source": t.get("source", "")})
+            cve_queries.append(f"{tech_name} {version}")
+    return {"versioned_tech": versioned, "cve_queries": cve_queries[:20], "mode": "safe-poc"}
+
+
+def run_tls_dns_audit(target, timeout=6):
+    """TLS/DNS checks: cert metadata, CAA, weak TLS support hint."""
+    host = target["hostname"]
+    result = {"host": host, "tls": {}, "dns": {}, "risks": []}
+    try:
+        ctx = ssl.create_default_context()
+        with socket.create_connection((host, 443), timeout=timeout) as sock:
+            with ctx.wrap_socket(sock, server_hostname=host) as ssock:
+                cert = ssock.getpeercert()
+                cipher = ssock.cipher()
+                result["tls"]["version"] = ssock.version()
+                result["tls"]["cipher"] = cipher[0] if cipher else None
+                result["tls"]["subject"] = cert.get("subject", [])
+                result["tls"]["notAfter"] = cert.get("notAfter")
+                if result["tls"]["version"] in ("TLSv1", "TLSv1.1"):
+                    result["risks"].append("TLS legado habilitado")
+    except Exception as e:
+        result["tls"]["error"] = str(e)
+        result["risks"].append("Falha ao validar TLS")
+
+    try:
+        caa = socket.getaddrinfo(f"caa.{host}", None)
+        result["dns"]["caa_lookup"] = bool(caa)
+    except Exception:
+        result["dns"]["caa_lookup"] = False
+        result["risks"].append("CAA nao identificado (verificar via DNS autoritativo)")
+    return result
 
 # ─────────────────────────────────────────────────────
 #  Module 1: Async Port Scanner
@@ -1724,7 +2018,7 @@ th{{background:#161b22;color:#58a6ff;font-weight:600}}tr:hover{{background:#161b
 #  Full Audit (Async)
 # ─────────────────────────────────────────────────────
 
-async def run_full_audit(target, http_client=None, timeout=5, concurrency=15):
+async def run_full_audit(target, http_client=None, timeout=5, concurrency=15, login_profile=None):
     w = get_panel_width()
     all_results = {}
 
@@ -1737,6 +2031,19 @@ async def run_full_audit(target, http_client=None, timeout=5, concurrency=15):
     all_results["cloud_buckets"] = await run_cloud_checker(target, http_client, timeout, concurrency)
     all_results["surface"] = await run_surface_mapper(target, http_client, timeout, concurrency)
     all_results["error_db"] = await run_error_db_scanner(target, http_client, timeout)
+    all_results["subdomains"] = list(await run_subdomain_enum(target, http_client, timeout))
+    all_results["technologies"] = await run_tech_fingerprint(target, http_client, timeout)
+    all_results["auth_crawl"] = await run_stateful_auth_crawler(
+        target, http_client=http_client, timeout=timeout, login_profile=login_profile
+    )
+    all_results["recon_plus"] = await run_recon_discovery(target, http_client=http_client, timeout=timeout)
+    all_results["active_owasp"] = await run_active_owasp_checks(
+        target, recon_data=all_results["recon_plus"], http_client=http_client, timeout=timeout
+    )
+    all_results["contextual_intel"] = await run_contextual_fingerprint_and_cve(
+        target, tech_data=all_results["technologies"], http_client=http_client, timeout=timeout
+    )
+    all_results["tls_dns"] = run_tls_dns_audit(target, timeout=timeout)
 
     print()
     export_report(target, all_results)
@@ -1911,6 +2218,10 @@ def build_parser():
     scan.add_argument("--surface", action="store_true", help="Mapeador de superficie")
     scan.add_argument("--subdomains", action="store_true", help="Enumeracao de subdominios")
     scan.add_argument("--tech", action="store_true", help="Fingerprinting de tecnologias")
+    scan.add_argument("--auth-crawl", action="store_true", dest="auth_crawl", help="Crawler autenticado stateful")
+    scan.add_argument("--active", action="store_true", help="Testes ativos OWASP com evidencia")
+    scan.add_argument("--recon-plus", action="store_true", dest="recon_plus", help="Recon avancado (robots/sitemap/OpenAPI/GraphQL)")
+    scan.add_argument("--tlsdns", action="store_true", help="Auditoria TLS/DNS")
 
     config = parser.add_argument_group("Configuracao")
     config.add_argument("--threads", type=int, default=15, help="Concorrencia async (default: 15)")
@@ -1924,6 +2235,11 @@ def build_parser():
     enterprise.add_argument("--proxy-list", type=str, default=None, dest="proxy_list", help="Arquivo com lista de proxies")
     enterprise.add_argument("--cookie", type=str, default=None, help="Cookie header para scan autenticado")
     enterprise.add_argument("--token", type=str, default=None, help="Authorization Bearer token")
+    enterprise.add_argument("--login-url", type=str, default=None, help="URL de login para crawler autenticado stateful")
+    enterprise.add_argument("--login-user", type=str, default=None, help="Usuario de login")
+    enterprise.add_argument("--login-pass", type=str, default=None, help="Senha de login")
+    enterprise.add_argument("--login-user-field", type=str, default="username", help="Campo de usuario no form")
+    enterprise.add_argument("--login-pass-field", type=str, default="password", help="Campo de senha no form")
     enterprise.add_argument("--ci", action="store_true", help="Modo CI/CD: exit(1) se achados criticos")
 
     return parser
@@ -1951,6 +2267,15 @@ async def run_headless(args):
         timeout=args.timeout, delay=THROTTLE_DELAY,
         proxy_list=args.proxy_list, cookie=args.cookie, token=args.token
     )
+    login_profile = None
+    if args.login_url and args.login_user and args.login_pass:
+        login_profile = {
+            "url": args.login_url,
+            "username": args.login_user,
+            "password": args.login_pass,
+            "user_field": args.login_user_field,
+            "pass_field": args.login_pass_field,
+        }
     all_results = {}
     run_all = args.all
 
@@ -1988,6 +2313,30 @@ async def run_headless(args):
     if run_all or args.tech:
         print()
         all_results["technologies"] = await run_tech_fingerprint(target, client, args.timeout)
+    if run_all or args.auth_crawl:
+        print()
+        all_results["auth_crawl"] = await run_stateful_auth_crawler(
+            target, client, args.timeout, login_profile=login_profile
+        )
+    if run_all or args.recon_plus:
+        print()
+        all_results["recon_plus"] = await run_recon_discovery(target, client, args.timeout)
+    if run_all or args.active:
+        print()
+        recon_data = all_results.get("recon_plus")
+        if recon_data is None:
+            recon_data = await run_recon_discovery(target, client, args.timeout)
+            all_results["recon_plus"] = recon_data
+        all_results["active_owasp"] = await run_active_owasp_checks(
+            target, recon_data=recon_data, http_client=client, timeout=args.timeout
+        )
+    if run_all:
+        all_results["contextual_intel"] = await run_contextual_fingerprint_and_cve(
+            target, tech_data=all_results.get("technologies", []), http_client=client, timeout=args.timeout
+        )
+    if run_all or args.tlsdns:
+        print()
+        all_results["tls_dns"] = run_tls_dns_audit(target, timeout=args.timeout)
 
     # Export reports
     if args.export:

@@ -1,11 +1,11 @@
 {
   "tool": "VulnRecon",
   "version": "4.0",
-  "timestamp": "2026-03-18 20:08:05 Hora oficial do Brasil",
+  "timestamp": "2026-03-21 00:21:57 Hora oficial do Brasil",
   "target": {
-    "hostname": "www.linkedin.com",
-    "ip": "104.18.41.41",
-    "url": "https://www.linkedin.com/feed/"
+    "hostname": "matheusaraujomacedo.pages.dev",
+    "ip": "172.66.47.13",
+    "url": "https://matheusaraujomacedo.pages.dev/"
   },
   "results": {
     "waf": [
@@ -17,7 +17,7 @@
       {
         "waf": "F5 BIG-IP",
         "evidence": "f5",
-        "method": "Headers"
+        "method": "Probe"
       }
     ],
     "ports": [
@@ -123,13 +123,12 @@
       }
     ],
     "headers": {
-      "present": [
+      "present": [],
+      "missing": [
         "Strict-Transport-Security",
         "X-Frame-Options",
         "X-Content-Type-Options",
-        "Content-Security-Policy"
-      ],
-      "missing": [
+        "Content-Security-Policy",
         "X-XSS-Protection",
         "Referrer-Policy",
         "Permissions-Policy"
@@ -138,250 +137,289 @@
     },
     "directories": [
       {
-        "path": "/.env",
-        "code": 302,
+        "path": "/.gitignore",
+        "code": 200,
         "hit": true,
-        "clen": 0
+        "clen": 124
+      },
+      {
+        "path": "/wp-config.php",
+        "code": 403,
+        "hit": true,
+        "clen": 4585
+      },
+      {
+        "path": "/.env",
+        "code": 200,
+        "hit": false,
+        "clen": 35253,
+        "code_note": "SOFT-404"
       },
       {
         "path": "/.env.bak",
-        "code": 302,
-        "hit": true,
-        "clen": 0
+        "code": 200,
+        "hit": false,
+        "clen": 35253,
+        "code_note": "SOFT-404"
       },
       {
         "path": "/.git/",
-        "code": 302,
-        "hit": true,
-        "clen": 0
+        "code": 200,
+        "hit": false,
+        "clen": 35253,
+        "code_note": "SOFT-404"
       },
       {
         "path": "/.git/config",
-        "code": 302,
-        "hit": true,
-        "clen": 0
-      },
-      {
-        "path": "/.gitignore",
-        "code": 302,
-        "hit": true,
-        "clen": 0
+        "code": 200,
+        "hit": false,
+        "clen": 35253,
+        "code_note": "SOFT-404"
       },
       {
         "path": "/.hg/",
-        "code": 302,
-        "hit": true,
-        "clen": 0
+        "code": 200,
+        "hit": false,
+        "clen": 35253,
+        "code_note": "SOFT-404"
       },
       {
         "path": "/.htaccess",
-        "code": 302,
-        "hit": true,
-        "clen": 0
+        "code": 200,
+        "hit": false,
+        "clen": 35253,
+        "code_note": "SOFT-404"
       },
       {
         "path": "/.htpasswd",
-        "code": 302,
-        "hit": true,
-        "clen": 0
+        "code": 200,
+        "hit": false,
+        "clen": 35253,
+        "code_note": "SOFT-404"
       },
       {
         "path": "/.svn/",
-        "code": 302,
-        "hit": true,
-        "clen": 0
+        "code": 200,
+        "hit": false,
+        "clen": 35253,
+        "code_note": "SOFT-404"
       },
       {
         "path": "/.well-known/security.txt",
-        "code": 302,
-        "hit": true,
-        "clen": 0
+        "code": 200,
+        "hit": false,
+        "clen": 35253,
+        "code_note": "SOFT-404"
       },
       {
         "path": "/admin",
-        "code": 302,
-        "hit": true,
-        "clen": 0
+        "code": 200,
+        "hit": false,
+        "clen": 35253,
+        "code_note": "SOFT-404"
       },
       {
         "path": "/admin/",
-        "code": 302,
-        "hit": true,
-        "clen": 0
+        "code": 200,
+        "hit": false,
+        "clen": 35253,
+        "code_note": "SOFT-404"
       },
       {
         "path": "/administrator/",
-        "code": 302,
-        "hit": true,
-        "clen": 0
+        "code": 200,
+        "hit": false,
+        "clen": 35253,
+        "code_note": "SOFT-404"
       },
       {
         "path": "/api/",
-        "code": 302,
-        "hit": true,
-        "clen": 0
+        "code": 200,
+        "hit": false,
+        "clen": 35253,
+        "code_note": "SOFT-404"
       },
       {
         "path": "/api/v1/",
-        "code": 302,
-        "hit": true,
-        "clen": 0
+        "code": 200,
+        "hit": false,
+        "clen": 35253,
+        "code_note": "SOFT-404"
       },
       {
         "path": "/backup.tar.gz",
-        "code": 302,
-        "hit": true,
-        "clen": 0
+        "code": 200,
+        "hit": false,
+        "clen": 35253,
+        "code_note": "SOFT-404"
       },
       {
         "path": "/backup.zip",
-        "code": 302,
-        "hit": true,
-        "clen": 0
+        "code": 200,
+        "hit": false,
+        "clen": 35253,
+        "code_note": "SOFT-404"
       },
       {
         "path": "/config.php",
-        "code": 302,
-        "hit": true,
-        "clen": 0
+        "code": 200,
+        "hit": false,
+        "clen": 35253,
+        "code_note": "SOFT-404"
       },
       {
         "path": "/config.yml",
-        "code": 302,
-        "hit": true,
-        "clen": 0
+        "code": 200,
+        "hit": false,
+        "clen": 35253,
+        "code_note": "SOFT-404"
       },
       {
         "path": "/cpanel",
-        "code": 302,
-        "hit": true,
-        "clen": 0
+        "code": 200,
+        "hit": false,
+        "clen": 35253,
+        "code_note": "SOFT-404"
       },
       {
         "path": "/crossdomain.xml",
-        "code": 302,
-        "hit": true,
-        "clen": 0
+        "code": 200,
+        "hit": false,
+        "clen": 35253,
+        "code_note": "SOFT-404"
       },
       {
         "path": "/database.sql",
-        "code": 302,
-        "hit": true,
-        "clen": 0
+        "code": 200,
+        "hit": false,
+        "clen": 35253,
+        "code_note": "SOFT-404"
       },
       {
         "path": "/db.sql",
-        "code": 302,
-        "hit": true,
-        "clen": 0
+        "code": 200,
+        "hit": false,
+        "clen": 35253,
+        "code_note": "SOFT-404"
       },
       {
         "path": "/dump.sql",
-        "code": 302,
-        "hit": true,
-        "clen": 0
+        "code": 200,
+        "hit": false,
+        "clen": 35253,
+        "code_note": "SOFT-404"
       },
       {
         "path": "/graphql",
-        "code": 302,
-        "hit": true,
-        "clen": 0
+        "code": 200,
+        "hit": false,
+        "clen": 35253,
+        "code_note": "SOFT-404"
       },
       {
         "path": "/humans.txt",
-        "code": 302,
-        "hit": true,
-        "clen": 0
+        "code": 200,
+        "hit": false,
+        "clen": 35253,
+        "code_note": "SOFT-404"
       },
       {
         "path": "/info.php",
-        "code": 302,
-        "hit": true,
-        "clen": 0
+        "code": 200,
+        "hit": false,
+        "clen": 35253,
+        "code_note": "SOFT-404"
       },
       {
         "path": "/openapi.json",
         "code": 200,
-        "hit": true,
-        "clen": 762303
+        "hit": false,
+        "clen": 35253,
+        "code_note": "SOFT-404"
       },
       {
         "path": "/phpinfo.php",
-        "code": 302,
-        "hit": true,
-        "clen": 0
+        "code": 200,
+        "hit": false,
+        "clen": 35253,
+        "code_note": "SOFT-404"
       },
       {
         "path": "/phpmyadmin/",
-        "code": 302,
-        "hit": true,
-        "clen": 0
+        "code": 200,
+        "hit": false,
+        "clen": 35253,
+        "code_note": "SOFT-404"
       },
       {
         "path": "/robots.txt",
-        "code": 302,
-        "hit": true,
-        "clen": 0
+        "code": 200,
+        "hit": false,
+        "clen": 35253,
+        "code_note": "SOFT-404"
       },
       {
         "path": "/security.txt",
-        "code": 302,
-        "hit": true,
-        "clen": 0
+        "code": 200,
+        "hit": false,
+        "clen": 35253,
+        "code_note": "SOFT-404"
       },
       {
         "path": "/server-info",
-        "code": 302,
-        "hit": true,
-        "clen": 0
+        "code": 200,
+        "hit": false,
+        "clen": 35253,
+        "code_note": "SOFT-404"
       },
       {
         "path": "/server-status",
-        "code": 302,
-        "hit": true,
-        "clen": 0
+        "code": 200,
+        "hit": false,
+        "clen": 35253,
+        "code_note": "SOFT-404"
       },
       {
         "path": "/sitemap.xml",
-        "code": 302,
-        "hit": true,
-        "clen": 0
+        "code": 200,
+        "hit": false,
+        "clen": 35253,
+        "code_note": "SOFT-404"
       },
       {
         "path": "/swagger.json",
         "code": 200,
-        "hit": true,
-        "clen": 762303
+        "hit": false,
+        "clen": 35253,
+        "code_note": "SOFT-404"
       },
       {
         "path": "/web.config",
-        "code": 302,
-        "hit": true,
-        "clen": 0
+        "code": 200,
+        "hit": false,
+        "clen": 35253,
+        "code_note": "SOFT-404"
       },
       {
         "path": "/webmail",
-        "code": 302,
-        "hit": true,
-        "clen": 0
+        "code": 200,
+        "hit": false,
+        "clen": 35253,
+        "code_note": "SOFT-404"
       },
       {
         "path": "/wp-admin/",
-        "code": 302,
-        "hit": true,
-        "clen": 0
-      },
-      {
-        "path": "/wp-config.php",
-        "code": 302,
-        "hit": true,
-        "clen": 0
+        "code": 200,
+        "hit": false,
+        "clen": 35253,
+        "code_note": "SOFT-404"
       },
       {
         "path": "/wp-login.php",
-        "code": 302,
-        "hit": true,
-        "clen": 0
+        "code": 200,
+        "hit": false,
+        "clen": 35253,
+        "code_note": "SOFT-404"
       }
     ],
     "admin_panels": [
@@ -593,153 +631,153 @@
     "cves": [],
     "cloud_buckets": [
       {
-        "url": "https://linkedin-static.s3.amazonaws.com",
+        "url": "https://matheusaraujomacedo.s3.amazonaws.com",
         "provider": "AWS S3",
-        "bucket": "linkedin-static",
-        "status": "PUBLICO",
-        "public": true,
-        "code": 200
-      },
-      {
-        "url": "https://linkedin.s3.amazonaws.com",
-        "provider": "AWS S3",
-        "bucket": "linkedin",
-        "status": "PRIVADO",
+        "bucket": "matheusaraujomacedo",
+        "status": "NAO EXISTE",
         "public": false,
-        "code": 403
+        "code": 404
       },
       {
-        "url": "https://linkedin-assets.s3.amazonaws.com",
+        "url": "https://matheusaraujomacedo-assets.s3.amazonaws.com",
         "provider": "AWS S3",
-        "bucket": "linkedin-assets",
-        "status": "PRIVADO",
+        "bucket": "matheusaraujomacedo-assets",
+        "status": "NAO EXISTE",
         "public": false,
-        "code": 403
+        "code": 404
       },
       {
-        "url": "https://linkedin-backup.s3.amazonaws.com",
+        "url": "https://matheusaraujomacedo-backup.s3.amazonaws.com",
         "provider": "AWS S3",
-        "bucket": "linkedin-backup",
-        "status": "PRIVADO",
+        "bucket": "matheusaraujomacedo-backup",
+        "status": "NAO EXISTE",
         "public": false,
-        "code": 403
+        "code": 404
       },
       {
-        "url": "https://linkedin-data.s3.amazonaws.com",
+        "url": "https://matheusaraujomacedo-data.s3.amazonaws.com",
         "provider": "AWS S3",
-        "bucket": "linkedin-data",
-        "status": "PRIVADO",
+        "bucket": "matheusaraujomacedo-data",
+        "status": "NAO EXISTE",
         "public": false,
-        "code": 403
+        "code": 404
       },
       {
-        "url": "https://linkedin-logs.s3.amazonaws.com",
+        "url": "https://matheusaraujomacedo-dev.s3.amazonaws.com",
         "provider": "AWS S3",
-        "bucket": "linkedin-logs",
-        "status": "PRIVADO",
+        "bucket": "matheusaraujomacedo-dev",
+        "status": "NAO EXISTE",
         "public": false,
-        "code": 403
+        "code": 404
       },
       {
-        "url": "https://linkedin-media.s3.amazonaws.com",
+        "url": "https://matheusaraujomacedo-logs.s3.amazonaws.com",
         "provider": "AWS S3",
-        "bucket": "linkedin-media",
-        "status": "PRIVADO",
+        "bucket": "matheusaraujomacedo-logs",
+        "status": "NAO EXISTE",
         "public": false,
-        "code": 403
+        "code": 404
       },
       {
-        "url": "https://linkedin-uploads.s3.amazonaws.com",
+        "url": "https://matheusaraujomacedo-media.s3.amazonaws.com",
         "provider": "AWS S3",
-        "bucket": "linkedin-uploads",
-        "status": "PRIVADO",
+        "bucket": "matheusaraujomacedo-media",
+        "status": "NAO EXISTE",
         "public": false,
-        "code": 403
+        "code": 404
       },
       {
-        "url": "https://linkedindata.blob.core.windows.net",
+        "url": "https://matheusaraujomacedo-private.s3.amazonaws.com",
+        "provider": "AWS S3",
+        "bucket": "matheusaraujomacedo-private",
+        "status": "NAO EXISTE",
+        "public": false,
+        "code": 404
+      },
+      {
+        "url": "https://matheusaraujomacedo-prod.s3.amazonaws.com",
+        "provider": "AWS S3",
+        "bucket": "matheusaraujomacedo-prod",
+        "status": "NAO EXISTE",
+        "public": false,
+        "code": 404
+      },
+      {
+        "url": "https://matheusaraujomacedo-public.s3.amazonaws.com",
+        "provider": "AWS S3",
+        "bucket": "matheusaraujomacedo-public",
+        "status": "NAO EXISTE",
+        "public": false,
+        "code": 404
+      },
+      {
+        "url": "https://matheusaraujomacedo-staging.s3.amazonaws.com",
+        "provider": "AWS S3",
+        "bucket": "matheusaraujomacedo-staging",
+        "status": "NAO EXISTE",
+        "public": false,
+        "code": 404
+      },
+      {
+        "url": "https://matheusaraujomacedo-static.s3.amazonaws.com",
+        "provider": "AWS S3",
+        "bucket": "matheusaraujomacedo-static",
+        "status": "NAO EXISTE",
+        "public": false,
+        "code": 404
+      },
+      {
+        "url": "https://matheusaraujomacedo-uploads.s3.amazonaws.com",
+        "provider": "AWS S3",
+        "bucket": "matheusaraujomacedo-uploads",
+        "status": "NAO EXISTE",
+        "public": false,
+        "code": 404
+      },
+      {
+        "url": "https://matheusaraujomacedo.blob.core.windows.net",
         "provider": "Azure Blob",
-        "bucket": "linkedindata",
-        "status": "PRIVADO",
-        "public": false,
-        "code": 403
-      },
-      {
-        "url": "https://storage.googleapis.com/linkedin",
-        "provider": "Google GCS",
-        "bucket": "linkedin",
-        "status": "PRIVADO",
-        "public": false,
-        "code": 403
-      },
-      {
-        "url": "https://linkedin-dev.s3.amazonaws.com",
-        "provider": "AWS S3",
-        "bucket": "linkedin-dev",
-        "status": "NAO EXISTE",
-        "public": false,
-        "code": 404
-      },
-      {
-        "url": "https://linkedin-private.s3.amazonaws.com",
-        "provider": "AWS S3",
-        "bucket": "linkedin-private",
-        "status": "NAO EXISTE",
-        "public": false,
-        "code": 404
-      },
-      {
-        "url": "https://linkedin-prod.s3.amazonaws.com",
-        "provider": "AWS S3",
-        "bucket": "linkedin-prod",
-        "status": "NAO EXISTE",
-        "public": false,
-        "code": 404
-      },
-      {
-        "url": "https://linkedin-public.s3.amazonaws.com",
-        "provider": "AWS S3",
-        "bucket": "linkedin-public",
-        "status": "NAO EXISTE",
-        "public": false,
-        "code": 404
-      },
-      {
-        "url": "https://linkedin-staging.s3.amazonaws.com",
-        "provider": "AWS S3",
-        "bucket": "linkedin-staging",
-        "status": "NAO EXISTE",
-        "public": false,
-        "code": 404
-      },
-      {
-        "url": "https://linkedin.blob.core.windows.net",
-        "provider": "Azure Blob",
-        "bucket": "linkedin",
-        "status": "HTTP 400",
-        "public": false,
-        "code": 400
-      },
-      {
-        "url": "https://linkedinstorage.blob.core.windows.net",
-        "provider": "Azure Blob",
-        "bucket": "linkedinstorage",
+        "bucket": "matheusaraujomacedo",
         "status": "TIMEOUT",
         "public": false,
         "code": null
       },
       {
-        "url": "https://storage.googleapis.com/linkedin-assets",
+        "url": "https://matheusaraujomacedodata.blob.core.windows.net",
+        "provider": "Azure Blob",
+        "bucket": "matheusaraujomacedodata",
+        "status": "TIMEOUT",
+        "public": false,
+        "code": null
+      },
+      {
+        "url": "https://matheusaraujomacedostorage.blob.core.windows.net",
+        "provider": "Azure Blob",
+        "bucket": "matheusaraujomacedostorage",
+        "status": "TIMEOUT",
+        "public": false,
+        "code": null
+      },
+      {
+        "url": "https://storage.googleapis.com/matheusaraujomacedo",
         "provider": "Google GCS",
-        "bucket": "linkedin-assets",
+        "bucket": "matheusaraujomacedo",
         "status": "NAO EXISTE",
         "public": false,
         "code": 404
       },
       {
-        "url": "https://storage.googleapis.com/linkedin-public",
+        "url": "https://storage.googleapis.com/matheusaraujomacedo-assets",
         "provider": "Google GCS",
-        "bucket": "linkedin-public",
+        "bucket": "matheusaraujomacedo-assets",
+        "status": "NAO EXISTE",
+        "public": false,
+        "code": 404
+      },
+      {
+        "url": "https://storage.googleapis.com/matheusaraujomacedo-public",
+        "provider": "Google GCS",
+        "bucket": "matheusaraujomacedo-public",
         "status": "NAO EXISTE",
         "public": false,
         "code": 404
@@ -870,66 +908,15 @@
       ],
       "url_params": [
         {
-          "url": "https://www.linkedin.com/legal/copyright-policy",
+          "url": "https://wa.me/5511934069176",
           "params": [
-            "trk"
+            "text"
           ],
-          "full_url": "https://www.linkedin.com/legal/copyright-policy?trk=d_checkpoint_lg_consumer_login_ft_copyright_policy"
-        },
-        {
-          "url": "https://www.linkedin.com/legal/cookie-policy",
-          "params": [
-            "trk"
-          ],
-          "full_url": "https://www.linkedin.com/legal/cookie-policy?trk=d_checkpoint_lg_consumer_login_ft_cookie_policy"
-        },
-        {
-          "url": "https://www.linkedin.com/checkpoint/rp/request-password-reset",
-          "params": [
-            "session_redirect"
-          ],
-          "full_url": "https://www.linkedin.com/checkpoint/rp/request-password-reset?session_redirect=https%3A%2F%2Fwww%2Elinkedin%2Ecom%2Ffeed%2F"
-        },
-        {
-          "url": "https://www.linkedin.com/help/linkedin/answer/34593",
-          "params": [
-            "lang",
-            "trk"
-          ],
-          "full_url": "https://www.linkedin.com/help/linkedin/answer/34593?lang=en&trk=d_checkpoint_lg_consumer_login_ft_community_guidelines"
-        },
-        {
-          "url": "https://www.linkedin.com/legal/privacy-policy",
-          "params": [
-            "trk"
-          ],
-          "full_url": "https://www.linkedin.com/legal/privacy-policy?trk=d_checkpoint_lg_consumer_login_ft_privacy_policy"
-        },
-        {
-          "url": "https://www.linkedin.com/legal/user-agreement",
-          "params": [
-            "trk"
-          ],
-          "full_url": "https://www.linkedin.com/legal/user-agreement?trk=d_checkpoint_lg_consumer_login_ft_user_agreement"
-        },
-        {
-          "url": "https://www.linkedin.com/signup/cold-join",
-          "params": [
-            "session_redirect"
-          ],
-          "full_url": "https://www.linkedin.com/signup/cold-join?session_redirect=https%3A%2F%2Fwww.linkedin.com%2Ffeed%2F"
-        },
-        {
-          "url": "https://www.linkedin.com/help/linkedin",
-          "params": [
-            "trk",
-            "lang"
-          ],
-          "full_url": "https://www.linkedin.com/help/linkedin?trk=d_checkpoint_lg_consumer_login_ft_send_feedback&lang=en"
+          "full_url": "https://wa.me/5511934069176?text=Olá Matheus, vi seu portfólio e gostaria de conversar!"
         }
       ],
       "error_disclosures": [],
-      "total": 28
+      "total": 21
     },
     "error_db": []
   }
